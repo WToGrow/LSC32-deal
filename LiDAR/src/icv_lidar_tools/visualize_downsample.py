@@ -164,12 +164,10 @@ def visualize_fused_points(
     color_mode: str = "intensity",
     adaptive_distance: bool = False,
     scene_mode: str = "first_scene",
-    apply_correction: bool = True,
 ):
     print("加载点云场景...")
     print(f"当前着色模式：{color_mode}（可选：intensity / height / distance）")
     print(f"清理模式：{'按距离自适应' if adaptive_distance else '统一轻量离群点清理'}")
-    print(f"点云修复：{'开启' if apply_correction else '关闭'}")
     print(
         f"场景模式：{scene_mode}（"
         f"first_scene=首个时间戳连续场景，"
@@ -268,10 +266,6 @@ def visualize_fused_points(
     intensity_all = np.concatenate(intensity_list, axis=0)
     print(f"场景点数：{len(xyz_all)}")
 
-    if apply_correction:
-        xyz_all = ProtocolPcapParser.correct_point_cloud_offset_distortion(xyz_all)
-        print("已应用相机/雷达偏移与畸变修正")
-
     raw_pcd = o3d.geometry.PointCloud()
     raw_pcd.points = o3d.utility.Vector3dVector(xyz_all)
     if np.all(np.isfinite(bbox_min)) and np.all(np.isfinite(bbox_max)):
@@ -330,5 +324,4 @@ if __name__ == "__main__":
         color_mode="intensity",
         adaptive_distance=False,
         scene_mode="all_t0_raw",
-        apply_correction=True,
     )

@@ -1,0 +1,25 @@
+# 点云数据文件
+*.bin
+*.pcd
+*.pcap
+*.csv
+*.las
+*.laz
+*.npy
+*.parquet
+*.ply
+
+# 数据文件夹
+data/
+dataset/
+raw/
+raw_data/
+output/
+logs/
+__pycache__/
+
+# 大文件
+*.zip
+*.rar
+*.7z
+*.gz

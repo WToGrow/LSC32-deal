@@ -48,6 +48,7 @@ def _normalize_with_percentile(values: np.ndarray, low: float = 1.0, high: float
 def _detect_time_column(column_names: list[str]) -> str | None:
     """Detect a reasonable timestamp column from parquet field names."""
     candidates = (
+        "timestamp_ns",
         "timestamp",
         "time_stamp",
         "time",
@@ -330,5 +331,5 @@ if __name__ == "__main__":
         color_mode="intensity",
         adaptive_distance=False,
         scene_mode="all_t0_raw",
-        apply_correction=False,
+        apply_correction=True,
     )

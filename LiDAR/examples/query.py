@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 
 # 你的 parquet 文件路径
-df = pd.read_parquet("G:/data/fused_lidar_gnss.parquet")
+df = pd.read_parquet("G:/data/parquet/lidar_points_protocol_162920.parquet")
 
 # 打印前 5 行
 print("==== parquet ====")
@@ -23,13 +23,13 @@ print(df[["x", "y", "z"]].describe())
 
 
 # 读取 bin
-points = np.fromfile("G:/data/lidar_points_protocol.bin", dtype=np.float32).reshape(-1, 4)
-print("\n")
-print("==== parquet ====")
-print("形状 (N, 4)：", points.shape)
-print("前5个点：")
-print(points[:5])
+# points = np.fromfile("G:/data/lidar_points_protocol.bin", dtype=np.float32).reshape(-1, 4)
+# print("\n")
+# print("==== parquet ====")
+# print("形状 (N, 4)：", points.shape)
+# print("前5个点：")
+# print(points[:5])
 
-print("\nX 范围：", points[:,0].min(), points[:,0].max())
-print("Y 范围：", points[:,1].min(), points[:,1].max())
-print("Z 范围：", points[:,2].min(), points[:,2].max())
+# print("\nX 范围：", points[:,0].min(), points[:,0].max())
+# print("Y 范围：", points[:,1].min(), points[:,1].max())
+# print("Z 范围：", points[:,2].min(), points[:,2].max())
