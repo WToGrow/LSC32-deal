@@ -1,0 +1,2 @@
+[console_scripts]
+icv-lidar-cli = icv_lidar_tools.cli:main

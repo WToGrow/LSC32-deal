@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: icv_lidar_tools
+Version: 0.1.0
+Summary: Utility-style Python package for GNSS/LiDAR parsing, export, visualization and fusion
+Requires-Python: >=3.10
+Requires-Dist: pandas>=2.2.2
+Requires-Dist: numpy>=1.26.4
+Requires-Dist: openpyxl>=3.1.5
+Requires-Dist: matplotlib>=3.9.0
+Requires-Dist: pyarrow>=17.0.0
+Requires-Dist: scapy>=2.6.0

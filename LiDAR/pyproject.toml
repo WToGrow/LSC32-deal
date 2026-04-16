@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "icv_lidar_tools"
+version = "0.1.0"
+description = "Utility-style Python package for GNSS/LiDAR parsing, export, visualization and fusion"
+requires-python = ">=3.10"
+dependencies = [
+  "pandas>=2.2.2",
+  "numpy>=1.26.4",
+  "openpyxl>=3.1.5",
+  "matplotlib>=3.9.0",
+  "pyarrow>=17.0.0",
+  "scapy>=2.6.0",
+]
+
+[project.scripts]
+icv-lidar-cli = "icv_lidar_tools.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
