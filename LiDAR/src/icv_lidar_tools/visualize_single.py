@@ -48,7 +48,6 @@ def _normalize_with_percentile(values: np.ndarray, low: float = 1.0, high: float
 def _detect_time_column(column_names: list[str]) -> str | None:
     """Detect a reasonable timestamp column from parquet field names."""
     candidates = (
-        "timestamp_ns",
         "timestamp",
         "time_stamp",
         "time",
@@ -90,51 +89,103 @@ def _smooth_scene_points(
     scene_scale: float,
     adaptive_distance: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Remove isolated outliers only; optionally use distance-aware cleanup."""
+    """Light denoise for scene visualization."""
     if len(xyz) == 0:
         return xyz, intensity
 
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(xyz)
 
-    if adaptive_distance:
-        distances = np.linalg.norm(xyz[:, :3], axis=1)
-        dist_norm = _normalize_with_percentile(distances, low=5.0, high=95.0)
-        # 远处点稍微放宽一点，避免过度误删；近处点更严格一点
-        nb_neighbors = np.clip(np.round(18 - 4 * dist_norm).astype(int), 10, 18)
-        std_ratio = np.clip(1.9 + 0.5 * dist_norm, 1.9, 2.4)
+    voxel_size = max(scene_scale * 0.01, 0.05)
+    pcd = pcd.voxel_down_sample(voxel_size=voxel_size)
+    xyz = np.asarray(pcd.points)
+    if len(xyz) == 0:
+        return xyz, intensity[:0]
 
-        keep_mask = np.zeros(len(xyz), dtype=bool)
-        for neighbor_count in np.unique(nb_neighbors):
-            idx = np.flatnonzero(nb_neighbors == neighbor_count)
-            if len(idx) == 0:
-                continue
-            sub_pcd = pcd.select_by_index(idx)
-            if len(sub_pcd.points) <= neighbor_count + 1:
-                keep_mask[idx] = True
-                continue
-            filtered, sub_indices = sub_pcd.remove_statistical_outlier(
-                nb_neighbors=int(neighbor_count),
-                std_ratio=float(np.median(std_ratio[idx])),
-            )
-            keep_mask[idx[sub_indices]] = True
-
-        if np.any(keep_mask):
-            xyz = xyz[keep_mask]
-            intensity = intensity[keep_mask]
+    if len(xyz) > 32:
+        if adaptive_distance:
+            distances = np.linalg.norm(xyz[:, :3], axis=1)
+            dist_norm = _normalize_with_percentile(distances, low=5.0, high=95.0)
+            nb_neighbors = np.clip(np.round(18 - 4 * dist_norm).astype(int), 10, 18)
+            std_ratio = np.clip(1.9 + 0.5 * dist_norm, 1.9, 2.4)
+            keep_mask = np.zeros(len(xyz), dtype=bool)
+            for neighbor_count in np.unique(nb_neighbors):
+                idx = np.flatnonzero(nb_neighbors == neighbor_count)
+                sub_pcd = pcd.select_by_index(idx)
+                if len(sub_pcd.points) <= neighbor_count + 1:
+                    keep_mask[idx] = True
+                    continue
+                filtered, sub_indices = sub_pcd.remove_statistical_outlier(
+                    nb_neighbors=int(neighbor_count),
+                    std_ratio=float(np.median(std_ratio[idx])),
+                )
+                keep_mask[idx[sub_indices]] = True
+            if np.any(keep_mask):
+                xyz = xyz[keep_mask]
+                intensity = intensity[: len(xyz)]
         else:
             filtered, indices = pcd.remove_statistical_outlier(nb_neighbors=16, std_ratio=2.1)
             xyz = np.asarray(filtered.points)
-            intensity = intensity[indices]
-    else:
-        nb_neighbors = 16
-        std_ratio = 2.1
-        if len(pcd.points) > nb_neighbors + 1:
-            filtered, indices = pcd.remove_statistical_outlier(nb_neighbors=nb_neighbors, std_ratio=std_ratio)
-            xyz = np.asarray(filtered.points)
-            intensity = intensity[indices]
+            intensity = intensity[indices] if len(intensity) >= len(indices) else intensity[: len(xyz)]
 
     return xyz, intensity
+
+
+def _complete_vehicle_by_symmetry(xyz: np.ndarray, intensity: np.ndarray, scene_scale: float) -> tuple[np.ndarray, np.ndarray]:
+    """Complete vehicle-like clusters by mirroring their left-right symmetry."""
+    if len(xyz) == 0:
+        return xyz, intensity
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(xyz)
+    labels = np.array(pcd.cluster_dbscan(eps=max(scene_scale * 0.035, 0.25), min_points=18, print_progress=False))
+    if labels.size == 0 or labels.max() < 0:
+        return xyz, intensity
+
+    completed_xyz = [xyz]
+    completed_intensity = [intensity]
+
+    for label in range(labels.max() + 1):
+        idx = np.flatnonzero(labels == label)
+        if len(idx) < 40:
+            continue
+        cluster = xyz[idx]
+        cluster_extent = cluster.ptp(axis=0)
+        if cluster_extent[0] < scene_scale * 0.06 or cluster_extent[1] > cluster_extent[0] * 1.1:
+            continue
+
+        y_center = float(np.median(cluster[:, 1]))
+        mirrored = cluster.copy()
+        mirrored[:, 1] = 2.0 * y_center - mirrored[:, 1]
+
+        merged = np.vstack((cluster, mirrored))
+        center = merged.mean(axis=0)
+        merged[:, 0] = 0.75 * merged[:, 0] + 0.25 * center[0]
+        merged[:, 2] = np.maximum(merged[:, 2], np.percentile(cluster[:, 2], 20.0))
+        completed_xyz.append(merged)
+        completed_intensity.append(np.full(len(merged), int(np.median(intensity[idx])), dtype=intensity.dtype))
+
+    xyz_out = np.concatenate(completed_xyz, axis=0)
+    intensity_out = np.concatenate(completed_intensity, axis=0)
+    return xyz_out, intensity_out
+
+
+def _reconstruct_surface_fill(xyz: np.ndarray, intensity: np.ndarray, scene_scale: float) -> tuple[np.ndarray, np.ndarray]:
+    """Create a light surface-inspired fill using voxel centers and local interpolation."""
+    if len(xyz) < 50:
+        return xyz, intensity
+
+    voxel_size = max(scene_scale * 0.02, 0.08)
+    grid = np.floor(xyz / voxel_size)
+    unique_grid, inverse = np.unique(grid, axis=0, return_inverse=True)
+    centers = np.zeros_like(unique_grid, dtype=np.float64)
+    voxel_intensity = np.zeros(len(unique_grid), dtype=np.float64)
+    for i in range(len(unique_grid)):
+        mask = inverse == i
+        centers[i] = xyz[mask].mean(axis=0)
+        voxel_intensity[i] = intensity[mask].mean()
+
+    return np.vstack((xyz, centers)), np.concatenate((intensity, voxel_intensity.astype(intensity.dtype)))
 
 
 def _build_scene_geometries(xyz: np.ndarray, intensity: np.ndarray, color_mode: str):
@@ -166,11 +217,13 @@ def visualize_points(
     adaptive_distance: bool = False,
     scene_mode: str = "first_scene",
     apply_correction: bool = True,
+    do_completion: bool = True,
 ):
     print("加载点云场景...")
     print(f"当前着色模式：{color_mode}（可选：intensity / height / distance）")
     print(f"清理模式：{'按距离自适应' if adaptive_distance else '统一轻量离群点清理'}")
     print(f"点云修复：{'开启' if apply_correction else '关闭'}")
+    print(f"补齐增强：{'开启' if do_completion else '关闭'}")
     print(
         f"场景模式：{scene_mode}（"
         f"first_scene=首个时间戳连续场景，"
@@ -269,10 +322,6 @@ def visualize_points(
     intensity_all = np.concatenate(intensity_list, axis=0)
     print(f"场景点数：{len(xyz_all)}")
 
-    if apply_correction:
-        xyz_all = ProtocolPcapParser.correct_point_cloud_offset_distortion(xyz_all)
-        print("已应用相机/雷达偏移与畸变修正")
-
     raw_pcd = o3d.geometry.PointCloud()
     raw_pcd.points = o3d.utility.Vector3dVector(xyz_all)
     if np.all(np.isfinite(bbox_min)) and np.all(np.isfinite(bbox_max)):
@@ -282,6 +331,16 @@ def visualize_points(
 
     raw_extent = raw_bbox.get_extent()
     raw_scene_scale = float(np.max(raw_extent)) if np.all(np.isfinite(raw_extent)) else 1.0
+
+    if apply_correction:
+        xyz_all = ProtocolPcapParser.correct_point_cloud_offset_distortion(xyz_all)
+        print("已应用相机/雷达偏移与畸变修正")
+
+    if do_completion:
+        xyz_all, intensity_all = _complete_vehicle_by_symmetry(xyz_all, intensity_all, raw_scene_scale)
+        xyz_all, intensity_all = _reconstruct_surface_fill(xyz_all, intensity_all, raw_scene_scale)
+        print("已应用对称补齐与表面增强")
+
     if raw_t0_mode:
         print("原始T0模式：不做离群点过滤")
     else:
@@ -331,5 +390,6 @@ if __name__ == "__main__":
         color_mode="intensity",
         adaptive_distance=False,
         scene_mode="all_t0_raw",
-        apply_correction=True,
+        apply_correction=False,
+        do_completion=False,
     )

@@ -1,15 +1,6 @@
-import sys
-from pathlib import Path
-
 import numpy as np
 import open3d as o3d
 import pyarrow.parquet as pq
-
-try:
-    from .lidar.pcap_parser_protocol import ProtocolPcapParser
-except ImportError:
-    sys.path.append(str(Path(__file__).resolve().parents[1]))
-    from icv_lidar_tools.lidar.pcap_parser_protocol import ProtocolPcapParser
 
 
 def _bright_colormap(values: np.ndarray) -> np.ndarray:

@@ -149,24 +149,6 @@ class MsopDecoder:
 class ProtocolPcapParser:
     """Pure binary protocol parser for LiDAR UDP packets (MSOP-only, GPU-accelerated math)."""
 
-    # Camera / sensor calibration used for visualization alignment.
-    DISTORTION_K1 = -0.52939418
-    DISTORTION_K2 = 0.37462897
-    DISTORTION_P1 = 0.0
-    DISTORTION_P2 = 0.0
-    DISTORTION_K3 = 0.0
-
-    CAMERA_INTRINSICS = {
-        "fx": 2041.23366196,
-        "fy": 2038.76906929,
-        "cx": 997.68672528,
-        "cy": 544.68141109,
-    }
-
-    MMWAVE_POS_MM = np.array([0.0, 0.0, 58.5], dtype=np.float64)
-    LIDAR_POS_MM = np.array([1.5, -291.8, 187.8], dtype=np.float64)
-    CAMERA_POS_MM = np.array([-1.5, -203.8, 169.8], dtype=np.float64)
-
     FULL_FIELD_COLUMNS = [
         "packet_timestamp",
         "src_port",
@@ -243,70 +225,6 @@ class ProtocolPcapParser:
         print(f"  payload==1206 packets: {self._stats['payload_len_1206_packets']}")
         print(f"  length filtered packets: {self._stats['length_filtered_packets']}")
         print(f"  cuda enabled: {self._stats['cuda_enabled']}")
-
-    @classmethod
-    def correct_point_cloud_offset(cls, xyz: np.ndarray) -> np.ndarray:
-        """Apply only the sensor-origin offset correction."""
-        if len(xyz) == 0:
-            return xyz
-        xyz = np.asarray(xyz, dtype=np.float64)
-        offset_mm = cls.LIDAR_POS_MM - cls.CAMERA_POS_MM
-        return xyz - offset_mm / 1000.0
-
-    @classmethod
-    def correct_point_cloud_distortion(cls, xyz: np.ndarray, max_iter: int = 5) -> np.ndarray:
-        """Apply only lens distortion correction on normalized coordinates."""
-        if len(xyz) == 0:
-            return xyz
-        xyz = np.asarray(xyz, dtype=np.float64)
-        corrected = xyz.copy()
-        z = corrected[:, 2]
-        valid = np.abs(z) > 1e-6
-        if not np.any(valid):
-            return corrected
-
-        xy_norm = corrected[valid, :2] / z[valid, None]
-        x = xy_norm[:, 0]
-        y = xy_norm[:, 1]
-        x_u = x.copy()
-        y_u = y.copy()
-
-        for _ in range(max_iter):
-            r2 = x_u * x_u + y_u * y_u
-            radial = 1.0 + cls.DISTORTION_K1 * r2 + cls.DISTORTION_K2 * r2 * r2 + cls.DISTORTION_K3 * r2 * r2 * r2
-            x_tangential = 2.0 * cls.DISTORTION_P1 * x_u * y_u + cls.DISTORTION_P2 * (r2 + 2.0 * x_u * x_u)
-            y_tangential = cls.DISTORTION_P1 * (r2 + 2.0 * y_u * y_u) + 2.0 * cls.DISTORTION_P2 * x_u * y_u
-            x_u = (x - x_tangential) / np.maximum(radial, 1e-8)
-            y_u = (y - y_tangential) / np.maximum(radial, 1e-8)
-
-        corrected[valid, 0] = x_u * z[valid]
-        corrected[valid, 1] = y_u * z[valid]
-        return corrected
-
-    @classmethod
-    def project_lidar_points_to_image(cls, xyz: np.ndarray) -> np.ndarray:
-        """Project LiDAR points into the camera image plane using fx/fy/cx/cy."""
-        if len(xyz) == 0:
-            return np.empty((0, 2), dtype=np.float64)
-
-        xyz = np.asarray(xyz, dtype=np.float64)
-        cam_xyz = cls.correct_point_cloud_offset_distortion(xyz)
-        z = cam_xyz[:, 2]
-        valid = np.abs(z) > 1e-6
-        if not np.any(valid):
-            return np.empty((0, 2), dtype=np.float64)
-
-        x = cam_xyz[valid, 0]
-        y = cam_xyz[valid, 1]
-        z = cam_xyz[valid, 2]
-        u = cls.FX * (x / z) + cls.CX
-        v = cls.FY * (y / z) + cls.CY
-        return np.column_stack((u, v))
-
-    @classmethod
-    def correct_point_cloud_offset_distortion(cls, xyz: np.ndarray) -> np.ndarray:
-        """Apply offset correction first, then distortion correction."""
-        return cls.correct_point_cloud_distortion(cls.correct_point_cloud_offset(xyz))
 
     @staticmethod
     def _read_exact(f: BinaryIO, size: int) -> bytes:
