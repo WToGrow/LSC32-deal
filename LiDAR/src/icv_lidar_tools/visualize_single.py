@@ -39,6 +39,7 @@ def _normalize_with_percentile(values: np.ndarray, low: float = 1.0, high: float
 def _detect_time_column(column_names: list[str]) -> str | None:
     """Detect a reasonable timestamp column from parquet field names."""
     candidates = (
+        "timestamp_ns",
         "timestamp",
         "time_stamp",
         "time",
@@ -111,7 +112,8 @@ def visualize_points(parquet_path: str, color_mode: str = "intensity"):
                 first_time_value = time_values[0]
                 print(f"首个时间戳 T0：{first_time_value}")
 
-            mask = time_values == first_time_value
+            # mask = time_values == first_time_value
+            mask = (time_values >= first_time_value) & (time_values <= first_time_value + 100_000_000)
             if not np.any(mask):
                 break
 
