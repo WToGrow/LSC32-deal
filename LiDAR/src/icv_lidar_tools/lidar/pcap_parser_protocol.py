@@ -4,7 +4,7 @@ import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import BinaryIO, Iterator
+from typing import BinaryIO, Iterator, Literal
 
 import numpy as np
 import pandas as pd
@@ -19,6 +19,20 @@ class DecodedMsopPacket:
     timestamp: datetime
     azimuth_deg: float
     points: list[LidarPoint]
+
+
+@dataclass(slots=True)
+class ParseConfig:
+    pcap_path: Path
+    out_path: Path | None = None
+    out_stem: Path | None = None
+    fmt: str = "parquet"
+    formats: tuple[str, ...] = ("parquet", "bin")
+    bin_mode: str = "kitti"
+    batch_size: int = 500_000
+    payload_byteorder: str = "little"
+    debug_stats: bool = False
+    use_cuda: bool = False
 
 
 class MsopDecoder:
@@ -433,6 +447,7 @@ class ProtocolPcapParser:
             yield df_chunk
 
     def parse_points_dataframe(self, pcap_path: str | Path) -> pd.DataFrame:
+        """Parse MSOP packets into a point dataframe."""
         self._reset_stats()
         chunks: list[pd.DataFrame] = []
         for chunk in self._iter_point_chunks_dataframe(pcap_path):
@@ -449,6 +464,7 @@ class ProtocolPcapParser:
         return df
 
     def parse_points(self, pcap_path: str | Path) -> list[LidarPoint]:
+        """Parse MSOP packets into LidarPoint objects."""
         points: list[LidarPoint] = []
         for df in self._iter_point_chunks_dataframe(pcap_path):
             for row in df.itertuples(index=False):
@@ -758,6 +774,7 @@ class ProtocolPcapParser:
         return outputs
 
     def export_parse_points(self, pcap_path: str | Path, out_path: str | Path, fmt: str = "parquet") -> Path:
+        """Export parsed points to parquet."""
         out = Path(out_path)
         out.parent.mkdir(parents=True, exist_ok=True)
         fmt_norm = fmt.lower()
@@ -784,3 +801,34 @@ class ProtocolPcapParser:
                 writer.close()
 
         return out
+
+    def export_full_fields_api(self, pcap_path: str | Path, out_stem: str | Path, formats: tuple[str, ...] = ("parquet", "bin"), bin_mode: str = "kitti", flush_points: int = 500_000) -> dict[str, Path]:
+        """Export full fields to parquet/bin and return generated outputs."""
+        return self.export_full_fields(
+            pcap_path=pcap_path,
+            out_stem=out_stem,
+            formats=formats,
+            bin_mode=bin_mode,
+            flush_points=flush_points,
+        )
+
+    @classmethod
+    def parse_pcap(cls, config: ParseConfig) -> dict[str, Path]:
+        parser = cls(
+            payload_byteorder=config.payload_byteorder,
+            debug_stats=config.debug_stats,
+            use_cuda=config.use_cuda,
+        )
+        outputs: dict[str, Path] = {}
+        if config.out_path is not None:
+            outputs["parquet"] = parser.export_parse_points(config.pcap_path, config.out_path, fmt=config.fmt)
+        if config.out_stem is not None:
+            outputs.update(
+                parser.export_full_fields(
+                    config.pcap_path,
+                    config.out_stem,
+                    formats=config.formats,
+                    bin_mode=config.bin_mode,
+                )
+            )
+        return outputs

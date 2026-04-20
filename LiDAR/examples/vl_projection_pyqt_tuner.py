@@ -111,9 +111,9 @@ R_AXIS_PRESETS: dict[str, np.ndarray] = {
     ),
     # 2) 雷达 x 右、y 上、z 前 -> 相机 x 右、y 下、z 前
     "preset_2_x_right_y_up_z_front": np.array(
-        [[1, 0, 0],
-         [0, -1, 0],
-         [0, 0, 1]],
+        [[-0.640407, 0.767508, 0.028454],
+         [-0.047300, 0.002436, 0.99878],
+         [-0.766578, -0.641035, 0.037864]],
         dtype=np.float32,
     ),
     # 3) 雷达 x 左、y 前、z 上 -> 相机 x 右、y 下、z 前
@@ -174,11 +174,16 @@ def load_point_cloud(parquet_path: Path) -> PointCloudBuffer:
     # 0----z
     # 1----x
     # 2----y
-    # xyz[:, 1] = -xyz[:, 1]
+    xyz[:, 1] = -xyz[:, 1]
+    # xyz[:, 0] = -xyz[:, 0]
+    # xyz[:, 2] = -xyz[:, 2]
+
     return PointCloudBuffer(timestamps_ns=ts, xyz=xyz)
 
 
 def frame_time_ns(frame_idx: int, fps: float, video_start_ns: int) -> int:
+    # 视频比雷达早 10 秒，所以帧时间戳 = 计算值 - x秒纳秒
+    # return int(video_start_ns + round(frame_idx * 1_000_000_000.0 / fps) - 5_000_000_000)
     return int(video_start_ns + round(frame_idx * 1_000_000_000.0 / fps))
 
 
@@ -187,12 +192,20 @@ def points_in_time_window(
     center_ns: int,
     half_window_ns: int,
 ) -> np.ndarray:
-    """二分检索时间窗口内点，返回 xyz 子数组。"""
+    # """二分检索时间窗口内点，返回 xyz 子数组。"""
     left = int(np.searchsorted(pc.timestamps_ns, center_ns - half_window_ns, side="left"))
     right = int(np.searchsorted(pc.timestamps_ns, center_ns + half_window_ns, side="right"))
+
+    # 只取时间戳 == current_frame_ns 的点
+    # left = int(np.searchsorted(pc.timestamps_ns, center_ns, side="left"))
+    # right = left + 1
+
     if right <= left:
-        return np.empty((0, 3), dtype=np.float32)
-    return pc.xyz[left:right]
+        # return np.empty((0, 3), dtype=np.float32)
+        return np.empty((0, 3), dtype=np.float32), np.empty((0,), dtype=np.int64)
+
+    # return pc.xyz[left:right]
+    return pc.xyz[left:right], pc.timestamps_ns[left:right]
 
 
 def axis_angle_deg_to_rotmat(axis: np.ndarray, angle_deg: float) -> np.ndarray:
@@ -401,6 +414,8 @@ class ProjectionTunerWindow(QMainWindow):
 
         self.current_frame_idx = 0
         self.playing = True
+        self.follow_playback = True
+        self.follow_playback = True
 
         self.tx = 0.0
         self.ty = 0.0
@@ -438,9 +453,9 @@ class ProjectionTunerWindow(QMainWindow):
         slider_panel = QWidget(root)
         slider_grid = QGridLayout(slider_panel)
 
-        self.tx_slider, self.tx_spin = self._make_slider_row(slider_grid, 0, "tx (cm)", -50000, 50000, 0)
+        self.tx_slider, self.tx_spin = self._make_slider_row(slider_grid, 0, "tx (cm)", -50000, 50000, -4.91)
         self.ty_slider, self.ty_spin = self._make_slider_row(slider_grid, 1, "ty (cm)", -50000, 50000, 0)
-        self.tz_slider, self.tz_spin = self._make_slider_row(slider_grid, 2, "tz (cm)", -50000, 50000, 0)
+        self.tz_slider, self.tz_spin = self._make_slider_row(slider_grid, 2, "tz (cm)", -50000, 50000, 39.31)
 
         self.rx_slider, self.rx_spin = self._make_slider_row(slider_grid, 3, "rx 绕雷达 x 轴 (deg)", -18000, 18000, 0)
         self.ry_slider, self.ry_spin = self._make_slider_row(slider_grid, 4, "ry 绕雷达 y 轴 (deg)", -18000, 18000, 0)
@@ -453,6 +468,12 @@ class ProjectionTunerWindow(QMainWindow):
         self.play_btn = QPushButton("暂停", root)
         self.play_btn.clicked.connect(self._toggle_play)
         controls.addWidget(self.play_btn)
+
+        self.follow_btn = QPushButton("跟随播放对齐", root)
+        self.follow_btn.setCheckable(True)
+        self.follow_btn.setChecked(True)
+        self.follow_btn.toggled.connect(self._on_follow_toggled)
+        controls.addWidget(self.follow_btn)
 
         self.reset_btn = QPushButton("重置外参", root)
         self.reset_btn.clicked.connect(self._reset_extrinsic)
@@ -519,6 +540,7 @@ class ProjectionTunerWindow(QMainWindow):
 
         self._build_custom_matrix_panel(layout)
         self._build_axis_threshold_panel(layout)
+        self._render_current_frame()
 
     def _build_custom_matrix_panel(self, layout: QVBoxLayout) -> None:
         panel = QWidget(self)
@@ -580,17 +602,17 @@ class ProjectionTunerWindow(QMainWindow):
         name: str,
         mn: int,
         mx: int,
-        default: int,
+        default: float,
     ) -> tuple[QSlider, QDoubleSpinBox]:
         label = QLabel(name)
         slider = QSlider(Qt.Horizontal)
         slider.setRange(mn, mx)
-        slider.setValue(default)
+        slider.setValue(int(round(default * 100)))
         spin = QDoubleSpinBox()
         spin.setDecimals(2)
         spin.setSingleStep(0.01)
         spin.setRange(mn / 100.0, mx / 100.0)
-        spin.setValue(default / 100.0)
+        spin.setValue(float(default))
 
         slider.valueChanged.connect(lambda v: spin.setValue(v / 100.0))
         spin.valueChanged.connect(lambda v: slider.setValue(int(round(v * 100))))
@@ -731,13 +753,16 @@ class ProjectionTunerWindow(QMainWindow):
         self.ry = float(self.ry_slider.value()) / 100.0
         self.rz = float(self.rz_slider.value()) / 100.0
         self._sync_axis_thresholds_from_ui()
-        # 停在当前帧时，也立即刷新
-        if not self.playing:
-            self._render_current_frame()
+        self._render_current_frame()
 
     def _toggle_play(self) -> None:
         self.playing = not self.playing
         self.play_btn.setText("暂停" if self.playing else "继续")
+        if self.playing and self.follow_playback:
+            self._advance_and_render_frame()
+
+    def _on_follow_toggled(self, checked: bool) -> None:
+        self.follow_playback = checked
 
     def _reset_extrinsic(self) -> None:
         self.tx_slider.setValue(0)
@@ -773,9 +798,9 @@ class ProjectionTunerWindow(QMainWindow):
     def _next_frame(self) -> None:
         if not self.playing:
             return
-        self._render_current_frame()
+        self._advance_and_render_frame()
 
-    def _render_current_frame(self) -> None:
+    def _advance_and_render_frame(self) -> None:
         ret, frame = self.cap.read()
         if not ret:
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -783,16 +808,33 @@ class ProjectionTunerWindow(QMainWindow):
             ret, frame = self.cap.read()
             if not ret:
                 return
+        self._render_frame(frame)
 
-        frame_ns = frame_time_ns(self.current_frame_idx, self.fps, self.video_start_ns)
-        xyz = points_in_time_window(self.pc, frame_ns, self.time_window_ns // 2)
+    def _render_current_frame(self) -> None:
+        current_pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES) or self.current_frame_idx)
+        if current_pos <= 0:
+            current_pos = self.current_frame_idx
+        frame_idx = max(0, current_pos - 1)
+        ret, frame = self.cap.read()
+        if not ret:
+            return
+        self._render_frame(frame, frame_idx=frame_idx)
+
+    def _render_frame(self, frame: np.ndarray, frame_idx: Optional[int] = None) -> None:
+        if frame_idx is None:
+            frame_idx = self.current_frame_idx
+
+        frame_ns = frame_time_ns(frame_idx, self.fps, self.video_start_ns)
+
+        # xyz = points_in_time_window(self.pc, frame_ns, self.time_window_ns // 2)
+        xyz, pc_ts_ns = points_in_time_window(self.pc, frame_ns, self.time_window_ns // 2)
+
         xyz = apply_axis_filter(xyz, self.axis_mode, self.r_lidar_to_cam, self.threshold_frame_mode)
 
         if self.test_point_mode:
             if len(xyz) == 0:
                 xyz_to_project = xyz
             else:
-                # 轴对照测试：优先取“正前方附近”的一个代表点；若没有，就取距离中位附近的点
                 distances = np.linalg.norm(xyz, axis=1)
                 front_score = np.abs(xyz[:, 0]) + np.abs(xyz[:, 2])
                 idx = int(np.lexsort((distances, front_score))[0])
@@ -820,10 +862,23 @@ class ProjectionTunerWindow(QMainWindow):
         for (u, v), c in zip(pts_in.astype(np.int32), colors):
             cv2.circle(frame, (int(u), int(v)), 2, (int(c[0]), int(c[1]), int(c[2])), -1)
 
+        # 时间换算
+        video_time_sec = frame_ns / 1e9
+        pc_time_sec = pc_ts_ns.mean() / 1e9 if len(pc_ts_ns) > 0 else 0.0
+        time_diff_sec = video_time_sec - pc_time_sec
+
+        # 绘制时间对比
+        cv2.putText(frame, f"Video Time: {video_time_sec:.3f} s", (20, 80),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
+        cv2.putText(frame, f"LiDAR Time: {pc_time_sec:.3f} s", (20, 120),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
+        cv2.putText(frame, f"Time Diff : {time_diff_sec:.3f} s", (20, 160),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
+
         cv2.putText(
             frame,
             (
-                f"frame={self.current_frame_idx} points={len(pts_in)} mode={point_mode_text} "
+                f"frame={frame_idx} points={len(pts_in)} mode={point_mode_text} "
                 f"tx={self.tx:.1f} ty={self.ty:.1f} tz={self.tz:.1f} "
                 f"rx(绕x)={self.rx:.1f} ry(绕y)={self.ry:.1f} rz(绕z)={self.rz:.1f}"
             ),
@@ -842,13 +897,13 @@ class ProjectionTunerWindow(QMainWindow):
         self.image_label.setPixmap(pix.scaled(self.image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
         self.info_label.setText(
-            f"video: {self.video_path.name} | fps={self.fps:.2f} | frame={self.current_frame_idx}/{self.frame_count} | "
+            f"video: {self.video_path.name} | fps={self.fps:.2f} | frame={frame_idx}/{self.frame_count} | "
             f"window=±{self.time_window_ns / 2 / 1e6:.1f}ms | visible_points={len(pts_in)} | "
             f"axis_preset={self.axis_preset.currentText()} | axis_filter={self.axis_mode} | mode={point_mode_text} | "
             f"t=({self.tx:.2f}, {self.ty:.2f}, {self.tz:.2f})cm rx(绕x)={self.rx:.2f} ry(绕y)={self.ry:.2f} rz(绕z)={self.rz:.2f}deg"
         )
 
-        self.current_frame_idx += 1
+        self.current_frame_idx = frame_idx + 1
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

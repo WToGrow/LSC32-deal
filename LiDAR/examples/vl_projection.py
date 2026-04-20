@@ -1,27 +1,15 @@
 from __future__ import annotations
 
-"""Video-LiDAR projection debugger.
+"""Clean LiDAR-to-video projection pipeline.
 
-功能说明
---------
-1. 读取视频和 parquet 点云。
-2. 以 `timestamp_ns` 为基准，把点云按时间窗口对齐到每一帧视频。
-3. 将雷达点从“世界坐标系”平移到“相机坐标系”（当前不考虑旋转）。
-4. 先用畸变系数做投影，再用相机内参得到像素坐标。
-5. 以流式 / 分块方式处理大 parquet，避免一次性把全量点云加载进内存。
-6. 每帧输出详细调试信息，方便检查时间同步、空间变换和画面覆盖范围。
-
-使用建议
---------
-- 你的 parquet 最好按 `timestamp_ns` 升序保存；如果不是升序，本脚本仍可运行，但时间窗口的严格性会下降。
-- 如果视频起始时间和点云起始时间不一致，可以通过 `--video-start-ns` 手动指定视频第一帧对应的时间戳。
-- 当前外参默认只使用平移，不使用旋转。如果后续拿到真实旋转矩阵，替换 `R_WORLD_TO_CAM` 即可。
+This module provides a callable projection API for external callers
+(e.g. Java web backend) and a minimal CLI entry point for batch usage.
 """
 
 from dataclasses import dataclass
 from pathlib import Path
+from datetime import datetime
 import argparse
-import math
 from typing import Iterator, Optional
 
 import cv2
@@ -48,42 +36,73 @@ DIST_COEFFS = np.array([-0.52939418, 0.37462897, 0.0, 0.0, 0.0], dtype=np.float3
 
 
 # =========================
-# 设备在世界坐标系中的位置（单位：cm）
-# 说明：
-# - 这里按你的要求，把这些值看作世界坐标系下的位置。
-# - 脚本默认用“仅平移、无旋转”的方式做世界坐标 → 相机坐标变换。
-# - 由于你提到“正前参考点”可看作相机所在位置，这里默认用它作为相机平移基准。
+# 设备/相机默认参数（固定值，供接口使用）
 # =========================
 LIDAR_WORLD_POS = np.array([1.5, -291.8, 187.8], dtype=np.float32)
 FRONT_REF_WORLD_POS = np.array([-1.5, -203.8, 169.8], dtype=np.float32)
 MMWAVE_WORLD_POS = np.array([0.0, 0.0, 58.5], dtype=np.float32)
-
-# 当前默认把相机放在“正前参考点”
 CAMERA_WORLD_POS = FRONT_REF_WORLD_POS.copy()
 
+# 默认外参：如后续由界面或上层服务传入，可覆盖这些固定值
+DEFAULT_R_LIDAR_TO_CAM = np.array(
+    [
+        # 1、启动时用第二辆车校对
+        # [-0.747909, 0.663802, 0.0],
+        # [-0.082236, -0.092656, -0.992296],
+        # [-0.658688, -0.742147, 0.123886],
 
-# R_WORLD_TO_CAM = np.eye(3, dtype=np.float32) # 无旋转
-R_LIDAR_TO_CAM = np.array([
-    # [ 0,  -1,  0],
-    # [ 0,  0, -1],
-    # [ 1,  0,  0]
-    [ 0,  0,  1],
-    [ 1,  0,  0],
-    [ 0,  1,  0]
-], dtype=np.float32)
-R_WORLD_TO_CAM = R_LIDAR_TO_CAM
+        # 2、相对静止前车校对
+        # [-0.744767, 0.667324, -0.046653],
+        # [-0.082669, -0.092262, -0.992297],
+        # [-0.662184, -0.739030, 0.123881],
 
-# T_WORLD_TO_CAM = (-R_WORLD_TO_CAM @ CAMERA_WORLD_POS.reshape(3, 1)).astype(np.float32)
-T_WORLD_TO_CAM = np.zeros((3, 1), dtype=np.float32) # 因为有世界坐标，所以无平移
+        # 3、启动前用建筑弧度校对
+        [0.723261, 0.688997, -0.046653],
+        [-0.021385, -0.045179, 0.998750],
+        [-0.690244, 0.723355, -0.017941],
+    ],
+    dtype=np.float32,
+)
+# DEFAULT_T_WORLD_TO_CAM = np.zeros((3, 1), dtype=np.float32)
+# m/数值
+DEFAULT_T_WORLD_TO_CAM = np.array(
+    [
+        # 1、
+        # [-3.36],
+        # [0],
+        # [38.67]
+        
+        # 2、
+        # [-2.12],
+        # [3.41],
+        # [10.94],
 
-R_VEC, _ = cv2.Rodrigues(R_WORLD_TO_CAM)
-R_VEC = R_VEC.astype(np.float32)
-T_VEC = T_WORLD_TO_CAM.astype(np.float32)
+        # 3、
+        [-3.43],
+        [0.48],
+        [56.09],
+    ],
+    dtype=np.float32
+)
 
 
 # =========================
 # 数据结构
 # =========================
+@dataclass
+class ProjectionConfig:
+    video_path: Path
+    parquet_path: Path
+    output_dir: Path | None = None
+    output_video_path: Path | None = None
+    batch_size: int = 500_000
+    time_window_ms: float = 100.0
+    video_start_ns: Optional[int] = None
+    video_time_offset_sec: float = -10.0
+    max_frames: Optional[int] = None
+    draw_overlay: bool = True
+
+
 @dataclass
 class FrameProjectionInfo:
     frame_idx: int
@@ -132,35 +151,29 @@ def _load_video_meta(video_path: Path) -> tuple[cv2.VideoCapture, float, int, in
 
 def _frame_time_ns(frame_idx: int, fps: float, video_start_ns: int) -> int:
     """把帧序号换算为时间戳（ns）。"""
+
+    # scale = (t_lidar_end - t_lidar_start) / (frame_count / fps * 1e9)
+    # return video_start_ns + frame_idx * (1e9 / fps) * scale
+    
     return int(video_start_ns + round(frame_idx * 1_000_000_000.0 / fps))
 
 
 def _world_to_camera(points_world: np.ndarray) -> np.ndarray:
-    """世界坐标系 → 相机坐标系（当前仅平移，不含旋转）。"""
+    """世界坐标系 → 相机坐标系。使用固定外参/镜像设置。"""
     pts = np.asarray(points_world, dtype=np.float32)
     if pts.ndim == 1:
         pts = pts.reshape(1, 3)
-    
-    # 修复：打印信息
-    res = (R_WORLD_TO_CAM @ pts.T).T + T_WORLD_TO_CAM.reshape(1, 3)
-    print("相机坐标系 Z 值范围：", res[:,2].min(), res[:,2].max())
-
-    # 修复：Z 轴取反，让点出现在相机前方
-    # res[:, 2] = -res[:, 2]
-
-    # 修复：全局坐标反向，视角彻底镜像
-    # res = -res
-    return res
+    if True:
+        pts[:, 0] = -pts[:, 0]
+    if False:
+        pts[:, 1] = -pts[:, 1]
+    if False:
+        pts[:, 2] = -pts[:, 2]
+    return (DEFAULT_R_LIDAR_TO_CAM @ pts.T).T + DEFAULT_T_WORLD_TO_CAM.reshape(1, 3)
 
 
-def _project_camera_points(points_cam: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """把相机坐标系下的点投影到像素平面。
-
-    返回值：
-    - img_pts: 像素坐标 (u, v)
-    - depth_z: 相机坐标系下的 Z 深度
-    - front_mask: Z>0 的点掩码结果
-    """
+def _project_camera_points(points_cam: np.ndarray, front_axis: str = "z") -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """把相机坐标系下的点投影到像素平面。"""
     if len(points_cam) == 0:
         return (
             np.empty((0, 2), dtype=np.float32),
@@ -169,12 +182,8 @@ def _project_camera_points(points_cam: np.ndarray) -> tuple[np.ndarray, np.ndarr
         )
 
     pts = np.asarray(points_cam, dtype=np.float32)
-    # front_mask = pts[:, 2] > 0.1
-    # front_mask = pts[:, 2] < -0.1
-    front_mask = pts[:, 1] > 0.1 #正前方
-    # front_mask = pts[:, 1] < -0.1
-    # front_mask = pts[:, 0] > 0.1
-    # front_mask = pts[:, 0] < -0.1
+    axis_idx = {"x": 0, "y": 1, "z": 2}.get(front_axis, 2)
+    front_mask = pts[:, axis_idx] > 0.1
     pts = pts[front_mask]
     if len(pts) == 0:
         return (
@@ -187,7 +196,7 @@ def _project_camera_points(points_cam: np.ndarray) -> tuple[np.ndarray, np.ndarr
     # 1) 旋转/平移到相机模型
     # 2) 畸变矫正
     # 3) 内参映射到像素坐标
-    img_pts, _ = cv2.projectPoints(pts, R_VEC, T_VEC, CAMERA_MATRIX, DIST_COEFFS)
+    img_pts, _ = cv2.projectPoints(pts, np.zeros((3, 1), dtype=np.float32), np.zeros((3, 1), dtype=np.float32), CAMERA_MATRIX, DIST_COEFFS)
     img_pts = img_pts.reshape(-1, 2)
     depth_z = pts[:, 2].copy()
 
@@ -222,80 +231,125 @@ def _bbox_cm(points_xyz: np.ndarray) -> Optional[tuple[float, float, float, floa
     )
 
 
+def _normalize_with_percentile(values: np.ndarray, low: float = 1.0, high: float = 99.0) -> np.ndarray:
+    if len(values) == 0:
+        return values
+    v_min, v_max = np.percentile(values, [low, high])
+    if np.isclose(v_min, v_max):
+        return np.zeros_like(values, dtype=np.float32)
+    return np.clip((values - v_min) / (v_max - v_min), 0.0, 1.0).astype(np.float32)
+
+
+def _color_by_depth(depth: np.ndarray) -> np.ndarray:
+    """按距离生成更接近 visualize_single.py 的亮色渐变 BGR。"""
+    if len(depth) == 0:
+        return np.empty((0, 3), dtype=np.uint8)
+
+    norm = _normalize_with_percentile(depth)
+    palette = np.array(
+        [
+            [255, 255, 0],   # 青蓝/黄系过渡
+            [128, 255, 0],   # 亮绿
+            [0, 255, 0],     # 绿
+            [0, 255, 128],   # 青绿
+            [0, 255, 255],   # 黄
+            [0, 165, 255],   # 橙
+            [0, 0, 255],     # 红
+        ],
+        dtype=np.float32,
+    )
+    scaled = norm * (len(palette) - 1)
+    left = np.floor(scaled).astype(np.int32)
+    right = np.clip(left + 1, 0, len(palette) - 1)
+    weight = (scaled - left).reshape(-1, 1)
+    colors = palette[left] * (1.0 - weight) + palette[right] * weight
+    colors = np.clip(colors * 1.05, 0, 255)
+    return colors.astype(np.uint8)
+
+
+def _compute_image_mask(frame: np.ndarray) -> np.ndarray:
+    """基于边缘的场景掩码"""
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    edges = cv2.Canny(gray, 50, 150)
+
+    # 膨胀让轮廓更厚（避免点被误删）
+    kernel = np.ones((5, 5), np.uint8)
+    mask = cv2.dilate(edges, kernel, iterations=1)
+
+    return mask > 0  # bool mask
+
+
+def _color_consistency_filter(frame, pts_uv, threshold=40):
+    """过滤颜色突变点"""
+    h, w, _ = frame.shape
+    valid = []
+
+    for (u, v) in pts_uv.astype(np.int32):
+        if not (1 <= u < w-1 and 1 <= v < h-1):
+            valid.append(False)
+            continue
+
+        center = frame[v, u].astype(np.int32)
+        patch = frame[v-1:v+2, u-1:u+2].astype(np.int32)
+
+        diff = np.mean(np.abs(patch - center))
+        valid.append(diff < threshold)
+
+    return np.array(valid, dtype=bool)
+
 # =========================
 # 流式 parquet 读取与逐帧匹配
 # =========================
-def _iter_point_batches(parquet_path: Path, batch_size: int) -> Iterator[pd.DataFrame]:
-    """按批次读取 parquet，避免一次性加载大文件。"""
+def _load_point_cloud_arrays(parquet_path: Path) -> tuple[np.ndarray, np.ndarray]:
     pf = pq.ParquetFile(parquet_path)
-    for batch in pf.iter_batches(batch_size=batch_size):
+    parts: list[pd.DataFrame] = []
+    for batch in pf.iter_batches(batch_size=500_000):
         df = batch.to_pandas()
-        yield df
+        if len(df) == 0:
+            continue
+        _require_columns(df, ["timestamp_ns", "x", "y", "z"])
+        parts.append(df[["timestamp_ns", "x", "y", "z"]].copy())
+    if not parts:
+        raise ValueError(f"parquet 中没有可用点云数据: {parquet_path}")
+    all_df = pd.concat(parts, ignore_index=True)
+    all_df = all_df.sort_values("timestamp_ns", kind="mergesort").reset_index(drop=True)
+    return all_df["timestamp_ns"].to_numpy(dtype=np.int64, copy=True), all_df[["x", "y", "z"]].to_numpy(dtype=np.float32, copy=True)
 
 
 def _stream_frames_points(
-    parquet_path: Path,
+    timestamps_ns: np.ndarray,
+    xyz: np.ndarray,
     fps: float,
     video_start_ns: int,
     time_window_ns: int,
-    batch_size: int,
 ) -> Iterator[tuple[int, int, pd.DataFrame]]:
-    """流式地产生“某帧对应的点云窗口”。
-
-    这里采用“时间有序”的处理方式：
-    - 先按批读取 parquet
-    - 每批内部按 timestamp_ns 排序
-    - 将点按时间推进到当前帧窗口中
-
-    适合 parquet 大文件，内存占用较小。
-    如果你的 parquet 全局不是按 timestamp_ns 升序，建议先预排序。
-    """
+    """按每帧中心时间进行二分查找，获取对应点云窗口。"""
     current_frame_idx = 0
-    current_frame_ns = _frame_time_ns(current_frame_idx, fps, video_start_ns)
     half_window = time_window_ns // 2
-    window_start = current_frame_ns - half_window
-    window_end = current_frame_ns + half_window
+    total = len(timestamps_ns)
+    while True:
+        current_frame_ns = _frame_time_ns(current_frame_idx, fps, video_start_ns)
+        left = int(np.searchsorted(timestamps_ns, current_frame_ns - half_window, side="left"))
+        right = int(np.searchsorted(timestamps_ns, current_frame_ns + half_window, side="right"))
 
-    buffer_parts: list[pd.DataFrame] = []
-    buffer_min_ts = None
+        # 只取时间戳 == current_frame_ns 的点
+        # left = int(np.searchsorted(timestamps_ns, current_frame_ns, side="left"))
+        # right = left + 1
 
-    for df in _iter_point_batches(parquet_path, batch_size=batch_size):
-        _require_columns(df, ["timestamp_ns", "x", "y", "z"])
-        if len(df) == 0:
-            continue
-
-        # 只保留当前需要的字段，降低后续开销
-        df = df[["timestamp_ns", "x", "y", "z", "intensity", "ring"]].copy() if all(c in df.columns for c in ["intensity", "ring"]) else df[["timestamp_ns", "x", "y", "z"]].copy()
-        df = df.sort_values("timestamp_ns", kind="mergesort")
-
-        if buffer_min_ts is None and len(df) > 0:
-            buffer_min_ts = int(df["timestamp_ns"].iloc[0])
-
-        buffer_parts.append(df)
-        buffer = pd.concat(buffer_parts, ignore_index=True)
-
-        # 按时间窗口不断吐出可处理的帧
-        while len(buffer) > 0:
-            # 当前帧的窗口中，取出落在时间范围内的点
-            mask = (buffer["timestamp_ns"].to_numpy() >= window_start) & (buffer["timestamp_ns"].to_numpy() <= window_end)
-            frame_df = buffer.loc[mask]
-
-            # 处理完当前窗口之前的点：这些点不会再用于未来帧
-            # 由于窗口是连续向前移动的，因此小于当前窗口起点的点可以丢弃
-            keep_mask = buffer["timestamp_ns"].to_numpy() >= window_start
-            buffer = buffer.loc[keep_mask].reset_index(drop=True)
-            buffer_parts = [buffer] if len(buffer) else []
-
-            yield current_frame_idx, current_frame_ns, frame_df
-
-            current_frame_idx += 1
-            current_frame_ns = _frame_time_ns(current_frame_idx, fps, video_start_ns)
-            window_start = current_frame_ns - half_window
-            window_end = current_frame_ns + half_window
-
-            # 如果缓存里已经没有更早的点，而新的批次还没到下一帧时间，暂停吐出
-            if len(buffer) == 0:
-                break
+        if left >= total and current_frame_idx > 0:
+            break
+        if right <= left:
+            frame_df = pd.DataFrame(columns=["timestamp_ns", "x", "y", "z"])
+        else:
+            frame_df = pd.DataFrame({
+                "timestamp_ns": timestamps_ns[left:right],
+                "x": xyz[left:right, 0],
+                "y": xyz[left:right, 1],
+                "z": xyz[left:right, 2],
+            })
+        yield current_frame_idx, current_frame_ns, frame_df
+        current_frame_idx += 1
 
 
 # =========================
@@ -304,21 +358,22 @@ def _stream_frames_points(
 def _project_frame_points(
     frame_df: pd.DataFrame,
     image_size: tuple[int, int],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    front_axis: str = "z",
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """对一帧窗口内的点做空间变换与投影。"""
     if len(frame_df) == 0:
         return (
             np.empty((0, 2), dtype=np.float32),
             np.empty((0, 3), dtype=np.float32),
+            np.empty((0,), dtype=np.float32),
             np.empty((0,), dtype=bool),
         )
 
     xyz = frame_df[["x", "y", "z"]].to_numpy(dtype=np.float32, copy=False)
     pts_cam = _world_to_camera(xyz)
-    img_pts, depth_z, front_mask = _project_camera_points(pts_cam)
+    img_pts, depth_z, front_mask = _project_camera_points(pts_cam, front_axis=front_axis)
 
-    # front_mask 是对原始点做的前方筛选，img_pts/depth_z 是筛选后的结果
-    return img_pts, pts_cam[front_mask], front_mask
+    return img_pts, pts_cam[front_mask], depth_z, front_mask
 
 
 def _clip_to_image(points_uv: np.ndarray, width: int, height: int) -> np.ndarray:
@@ -333,215 +388,273 @@ def _clip_to_image(points_uv: np.ndarray, width: int, height: int) -> np.ndarray
     )
 
 
-def run_projection_debug(
-    video_path: Path,
-    parquet_path: Path,
-    output_dir: Path,
-    batch_size: int = 500_000,
-    time_window_ms: float = 40.0,
-    video_start_ns: Optional[int] = None,
-    max_frames: Optional[int] = None,
-    draw_overlay: bool = False,
-) -> None:
+def run_projection(config: ProjectionConfig) -> Path | None:
+    video_path = config.video_path
+    parquet_path = config.parquet_path
+    output_dir = config.output_dir or Path("./vl_projection_out")
+    output_video_path = config.output_video_path
+    batch_size = config.batch_size
+    time_window_ms = max(config.time_window_ms, 100.0)
+    video_start_ns = config.video_start_ns
+    max_frames = config.max_frames
+    draw_overlay = config.draw_overlay
+    front_axis = "z"
+
+
     cap, fps, width, height, frame_count = _load_video_meta(video_path)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    timestamps_ns, xyz = _load_point_cloud_arrays(parquet_path)
+    # ----repair-------
+    t_lidar_start = timestamps_ns[0]
+    t_lidar_end = timestamps_ns[-1]
+    
+
     if video_start_ns is None:
-        # 默认策略：把视频第 0 帧时间映射到点云第 0 个时间戳。
-        # 如果你的相机和雷达有更准确的同步基准，建议用命令行参数显式指定。
-        pq_file = pq.ParquetFile(parquet_path)
-        first_batch = next(pq_file.iter_batches(batch_size=1), None)
-        if first_batch is None:
+        if len(timestamps_ns) == 0:
             raise ValueError(f"parquet 中没有数据: {parquet_path}")
-        first_df = first_batch.to_pandas()
-        _require_columns(first_df, ["timestamp_ns"])
-        video_start_ns = int(first_df["timestamp_ns"].iloc[0])
+        # video_start_ns = int(timestamps_ns[0])
+
+        # --------repair---------
+        video_start_ns = int(
+        timestamps_ns[0] + config.video_time_offset_sec * 1_000_000_000
+        )
+
+    print("video_start_ns:", video_start_ns)
+    print("first lidar ts:", timestamps_ns[0])
+    print("last lidar ts:", timestamps_ns[-1])
+    # else:
+    #     video_start_ns = config.video_start_ns
+
+    # 视频比雷达早 10 秒
+    # video_start_ns = video_start_ns + 10 * 10**9
 
     time_window_ns = int(time_window_ms * 1_000_000)
     timestamp_tag = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-    out_video_path = output_dir / f"{video_path.stem}_projection_{timestamp_tag}}.mp4"
+    if output_video_path is None:
+        out_video_path = output_dir / f"{video_path.stem}_projection_{timestamp_tag}.mp4"
+    else:
+        out_video_path = Path(output_video_path)
+        out_video_path.parent.mkdir(parents=True, exist_ok=True)
     writer = None
     if draw_overlay:
-        writer = cv2.VideoWriter(
-            str(out_video_path),
-            cv2.VideoWriter_fourcc(*"mp4v"),
-            fps,
-            (width, height),
-        )
-
-    print("========== LiDAR / Video 投影调试开始 ==========")
-    print(f"视频: {video_path}")
-    print(f"点云: {parquet_path}")
-    print(f"视频尺寸: {width}x{height}, fps={fps:.3f}, frame_count={frame_count}")
-    print(f"时间窗口: ±{time_window_ms/2:.1f} ms")
-    print(f"相机世界坐标位置(cm): {CAMERA_WORLD_POS.tolist()}")
-    print(f"激光雷达世界坐标位置(cm): {LIDAR_WORLD_POS.tolist()}")
-    print(f"毫米波雷达世界坐标位置(cm): {MMWAVE_WORLD_POS.tolist()}")
-    print(f"视频起始时间戳(video_start_ns): {video_start_ns}")
+        writer = cv2.VideoWriter(str(out_video_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
 
     frame_limit = frame_count if max_frames is None else min(frame_count, max_frames)
+    frame_iter = _stream_frames_points(timestamps_ns=timestamps_ns, xyz=xyz, fps=fps, video_start_ns=video_start_ns, time_window_ns=time_window_ns)
 
-    # 为了满足“分块流式处理”，这里用 parquet 批量推进时间窗口。
-    # 你可以把 batch_size 设大一点提高吞吐，也可以设小一点减少内存。
-    frame_iter = _stream_frames_points(
-        parquet_path=parquet_path,
-        fps=fps,
-        video_start_ns=video_start_ns,
-        time_window_ns=time_window_ns,
-        batch_size=batch_size,
-    )
+    # for frame_idx, frame_time_ns, frame_df in frame_iter:
+    #     if frame_idx >= frame_limit:
+    #         break
+    #     ret, frame = cap.read()
+    #     if not ret:
+    #         break
+    #     if len(frame_df) == 0:
+    #         if writer is not None:
+    #             writer.write(frame)
+    #         continue
+
+    #     img_pts, pts_cam_front, depth_z, front_mask = _project_frame_points(frame_df, (width, height), front_axis)
+    #     in_image_mask = _clip_to_image(img_pts, width, height)
+
+    #     # ================= 颜色一致性过滤 =================
+    #     color_mask = _color_consistency_filter(frame, img_pts_in)
+
+    #     img_pts_in = img_pts_in[color_mask]
+    #     depth_in = depth_in[color_mask]
+
+    #     # img_pts_in = img_pts[in_image_mask]
+    #     # depth_in = depth_z[in_image_mask]
+
+    #     # ================= 图像掩码过滤 =================
+    #     mask_img = _compute_image_mask(frame)
+
+    #     valid_mask = []
+    #     for (u, v) in img_pts_in.astype(np.int32):
+    #         if 0 <= u < width and 0 <= v < height:
+    #             valid_mask.append(mask_img[v, u])
+    #         else:
+    #             valid_mask.append(False)
+
+    #     valid_mask = np.array(valid_mask, dtype=bool)
+
+    #     img_pts_in = img_pts_in[valid_mask]
+    #     depth_in = depth_in[valid_mask]
+
+    #     if len(img_pts_in) > 0:
+    #         draw_pts = img_pts_in.astype(np.int32, copy=False)
+    #         colors = _color_by_depth(depth_in)
+    #         for (u, v), c in zip(draw_pts, colors):
+    #             if 0 <= u < width and 0 <= v < height:
+    #                 cv2.circle(frame, (int(u), int(v)), 2, (int(c[0]), int(c[1]), int(c[2])), -1)
+
+    #     if writer is not None:
+    #         writer.write(frame)
+
+    prev_depth_map = {}
 
     for frame_idx, frame_time_ns, frame_df in frame_iter:
         if frame_idx >= frame_limit:
             break
 
-        # 从视频中读出当前帧
         ret, frame = cap.read()
         if not ret:
-            print(f"视频已结束，停止于 frame_idx={frame_idx}")
             break
 
         if len(frame_df) == 0:
-            print(
-                f"[frame {frame_idx:05d}] t={frame_time_ns} ns | window_points=0 | projected=0 | no lidar points in window"
-            )
             if writer is not None:
                 writer.write(frame)
             continue
 
-        xyz = frame_df[["x", "y", "z"]].to_numpy(dtype=np.float32, copy=False)
-        pts_cam = _world_to_camera(xyz)
+        # ========= 投影 =========
+        img_pts, pts_cam_front, depth_z, front_mask = _project_frame_points(
+            frame_df, (width, height), front_axis
+        )
 
-        # front_mask = pts_cam[:, 2] > 0.1
-        # pts_cam_front = pts_cam[front_mask]
-        # 投影
-        # img_pts, _depth_z, _ = _project_camera_points(pts_cam)
-        # in_image_mask = _clip_to_image(img_pts, width, height)
-        # img_pts_in = img_pts[in_image_mask]
-        # pts_cam_in = pts_cam_front[in_image_mask]
-
-        # ====================== 修复 ======================
-        # 1. 先获取前方点掩码 + 投影点
-        img_pts, depth_z, front_mask = _project_camera_points(pts_cam)
-        
-        # 2. 计算画面内掩码（和 img_pts 长度完全一致）
+        # ========= 图像范围过滤 =========
         in_image_mask = _clip_to_image(img_pts, width, height)
-        
-        # 3. 维度严格匹配：img_pts → in_image_mask → pts_cam_front
-        pts_cam_front = pts_cam[front_mask]  # 前方点
-        img_pts_in = img_pts[in_image_mask]   # 画面内投影点
-        pts_cam_in = pts_cam_front[in_image_mask]  # 画面内相机坐标点
-        
-        # 统计调试信息
-        image_bbox = _bbox_int(img_pts_in)
-        device_bbox = _bbox_cm(xyz)
+        img_pts_in = img_pts[in_image_mask]
+        depth_in = depth_z[in_image_mask]
 
-        info = FrameProjectionInfo(
-            frame_idx=frame_idx,
-            frame_time_ns=frame_time_ns,
-            point_count_in_window=len(frame_df),
-            point_count_in_front=len(pts_cam_front),
-            projected_count=len(img_pts_in),
-            image_bbox=image_bbox,
-            device_bbox_cm=device_bbox,
-        )
+        if len(img_pts_in) == 0:
+            if writer:
+                writer.write(frame)
+            continue
 
-        # 输出每一帧的调试信息，便于排查：
-        # 1) 时间窗口内是否有点
-        # 2) 点是否在相机前方
-        # 3) 投影后是否落在图像范围内
-        # 4) 投影结果是否出现异常坐标
-        print(
-            f"[frame {info.frame_idx:05d}] t={info.frame_time_ns} ns | "
-            f"window_points={info.point_count_in_window} | front_points={info.point_count_in_front} | "
-            f"projected_in_image={info.projected_count}"
-        )
-        if info.image_bbox is not None:
-            u0, v0, u1, v1 = info.image_bbox
-            print(f"  image_bbox(u,v)=({u0}, {v0}) -> ({u1}, {v1})")
-        else:
-            print("  image_bbox(u,v)=None")
+        # ========= 图像掩码过滤 =========
+        mask_img = _compute_image_mask(frame)
 
-        if info.device_bbox_cm is not None:
-            x0, x1, y0, y1, z0, z1 = info.device_bbox_cm
-            print(
-                f"  world_bbox(cm): x[{x0:.2f}, {x1:.2f}], y[{y0:.2f}, {y1:.2f}], z[{z0:.2f}, {z1:.2f}]"
-            )
+        valid_mask = []
+        for (u, v) in img_pts_in.astype(np.int32):
+            if 0 <= u < width and 0 <= v < height:
+                valid_mask.append(mask_img[v, u])
+            else:
+                valid_mask.append(False)
 
-        # 把投影点画到当前帧上，方便人工检查。
-        # 颜色采用红色小圆点，若你想看深度分布，可自行改成伪彩色。
-        if len(img_pts_in) > 0:
-            draw_pts = img_pts_in.astype(np.int32, copy=False)
-            for (u, v) in draw_pts:
-                if 0 <= u < width and 0 <= v < height:
-                    cv2.circle(frame, (int(u), int(v)), 2, (0, 0, 255), -1)
+        valid_mask = np.array(valid_mask, dtype=bool)
 
-        # 如果要额外观察相机画面与投影，可以输出到视频
+        img_pts_in = img_pts_in[valid_mask]
+        depth_in = depth_in[valid_mask]
+
+        if len(img_pts_in) == 0:
+            if writer:
+                writer.write(frame)
+            continue
+
+        # ========= 颜色一致性过滤 =========
+        color_mask = _color_consistency_filter(frame, img_pts_in)
+
+        img_pts_in = img_pts_in[color_mask]
+        depth_in = depth_in[color_mask]
+
+        if len(img_pts_in) == 0:
+            if writer:
+                writer.write(frame)
+            continue
+
+        # ========= 深度时序过滤 =========
+        new_map = {}
+        temporal_mask = []
+
+        for (u, v), d in zip(img_pts_in.astype(np.int32), depth_in):
+            key = (u, v)
+
+            if key in prev_depth_map:
+                if abs(prev_depth_map[key] - d) > 0.5:
+                    temporal_mask.append(False)
+                    continue
+
+            temporal_mask.append(True)
+            new_map[key] = d
+
+        temporal_mask = np.array(temporal_mask, dtype=bool)
+
+        img_pts_in = img_pts_in[temporal_mask]
+        depth_in = depth_in[temporal_mask]
+
+        prev_depth_map = new_map
+
+        if len(img_pts_in) == 0:
+            if writer:
+                writer.write(frame)
+            continue
+
+        # ========= 绘制 =========
+        draw_pts = img_pts_in.astype(np.int32, copy=False)
+        colors = _color_by_depth(depth_in)
+
+        for (u, v), c in zip(draw_pts, colors):
+            if 0 <= u < width and 0 <= v < height:
+                cv2.circle(frame, (u, v), 2, (int(c[0]), int(c[1]), int(c[2])), -1)
+
         if writer is not None:
-            cv2.putText(
-                frame,
-                f"frame={frame_idx} points={len(img_pts_in)}",
-                (20, 40),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.0,
-                (0, 255, 0),
-                2,
-                cv2.LINE_AA,
-            )
             writer.write(frame)
 
     cap.release()
     if writer is not None:
         writer.release()
-        print(f"叠加调试视频已输出: {out_video_path}")
+        return out_video_path
+    return None
 
-    print("========== LiDAR / Video 投影调试结束 ==========")
+
+def run_projection_debug(
+    video_path: Path,
+    parquet_path: Path,
+    output_dir: Path,
+    batch_size: int = 500_000,
+    time_window_ms: float = 150.0,
+    video_start_ns: Optional[int] = None,
+    max_frames: Optional[int] = None,
+    draw_overlay: bool = True,
+) -> None:
+    out_video_path = run_projection(
+        ProjectionConfig(
+            video_path=video_path,
+            parquet_path=parquet_path,
+            output_dir=output_dir,
+            batch_size=batch_size,
+            time_window_ms=time_window_ms,
+            video_start_ns=video_start_ns,
+            max_frames=max_frames,
+            draw_overlay=draw_overlay,
+        )
+    )
+    if out_video_path is not None:
+        print(f"叠加调试视频已输出: {out_video_path}")
 
 
 # =========================
 # 命令行入口
 # =========================
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="LiDAR parquet 与视频逐帧投影调试脚本")
+    parser = argparse.ArgumentParser(description="LiDAR parquet 与视频投影工具")
     parser.add_argument("--video", required=True, type=Path, help="输入视频路径")
     parser.add_argument("--parquet", required=True, type=Path, help="输入点云 parquet 路径")
-    parser.add_argument("--output-dir", default=Path("./vl_projection_out"), type=Path, help="输出目录")
+    parser.add_argument("--output-dir", default=Path("G:/data/vl_projection_out"), type=Path, help="输出目录")
     parser.add_argument("--batch-size", default=500_000, type=int, help="parquet 分块大小")
     parser.add_argument("--time-window-ms", default=40.0, type=float, help="每帧时间窗口大小（毫秒）")
-    parser.add_argument("--video-start-ns", default=None, type=int, help="视频第0帧对应的时间戳(ns)，不填则自动用 parquet 首点时间")
-    parser.add_argument("--max-frames", default=None, type=int, help="最多处理多少帧，用于调试")
-    parser.add_argument("--draw-overlay", action="store_true", help="是否输出带投影点的调试视频")
+    parser.add_argument("--video-start-ns", default=None, type=int, help="视频第0帧对应的时间戳(ns)")
+    parser.add_argument("--max-frames", default=None, type=int, help="最多处理多少帧")
+    parser.add_argument("--draw-overlay", action="store_true", help="是否输出带投影点的视频")
     return parser
 
 
 def main() -> None:
-    video_path = Path(r"G:\data\2025-01-12\video\20260112_162910_正前_000.mp4")
-    parquet_path = Path(r"G:\data\2025-01-12\parquet_out\lidar_points_protocol_162920.parquet")
-    output_dir = Path(r"G:\data\vl_projection_out")
-    batch_size = 500_000
-    time_window_ms = 100.0
-    video_start_ns = None
-    max_frames = 50    #None
-    draw_overlay = True
-    # args = build_arg_parser().parse_args()
-    run_projection_debug(
-        # video_path=args.video,
-        # parquet_path=args.parquet,
-        # output_dir=args.output_dir,
-        # batch_size=args.batch_size,
-        # time_window_ms=args.time_window_ms,
-        # video_start_ns=args.video_start_ns,
-        # max_frames=args.max_frames,
-        # draw_overlay=args.draw_overlay,
-        video_path=video_path,
-        parquet_path=parquet_path,
-        output_dir=output_dir,
-        batch_size=batch_size,
-        time_window_ms=time_window_ms,
-        video_start_ns=video_start_ns,
-        max_frames=max_frames,
-        draw_overlay=draw_overlay,
+    args = build_arg_parser().parse_args()
+    out_video_path = run_projection(
+        ProjectionConfig(
+            video_path=args.video,
+            parquet_path=args.parquet,
+            output_dir=args.output_dir,
+            batch_size=args.batch_size,
+            time_window_ms=args.time_window_ms,
+            video_start_ns=args.video_start_ns,
+            max_frames=args.max_frames,
+            # draw_overlay=args.draw_overlay,
+        )
     )
+    if out_video_path is not None:
+        print(f"叠加调试视频已输出: {out_video_path}")
 
 
 if __name__ == "__main__":

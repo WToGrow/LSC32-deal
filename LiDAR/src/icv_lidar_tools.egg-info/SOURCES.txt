@@ -1,8 +1,5 @@
 pyproject.toml
 src/icv_lidar_tools/__init__.py
-src/icv_lidar_tools/cli.py
-src/icv_lidar_tools/exporters.py
-src/icv_lidar_tools/fusion.py
 src/icv_lidar_tools/models.py
 src/icv_lidar_tools/time_sync.py
 src/icv_lidar_tools/visualization.py
