@@ -64,9 +64,12 @@ CAMERA_WORLD_POS = FRONT_REF_WORLD_POS.copy()
 
 # R_WORLD_TO_CAM = np.eye(3, dtype=np.float32) # 无旋转
 R_LIDAR_TO_CAM = np.array([
-    [ 0,  -3,  0],
-    [ 0,  0, -1],
-    [ 1,  0,  0]
+    # [ 0,  -1,  0],
+    # [ 0,  0, -1],
+    # [ 1,  0,  0]
+    [ 0,  0,  1],
+    [ 1,  0,  0],
+    [ 0,  1,  0]
 ], dtype=np.float32)
 R_WORLD_TO_CAM = R_LIDAR_TO_CAM
 
@@ -146,7 +149,7 @@ def _world_to_camera(points_world: np.ndarray) -> np.ndarray:
     # res[:, 2] = -res[:, 2]
 
     # 修复：全局坐标反向，视角彻底镜像
-    res = -res
+    # res = -res
     return res
 
 
@@ -166,7 +169,12 @@ def _project_camera_points(points_cam: np.ndarray) -> tuple[np.ndarray, np.ndarr
         )
 
     pts = np.asarray(points_cam, dtype=np.float32)
-    front_mask = pts[:, 2] > 0.1
+    # front_mask = pts[:, 2] > 0.1
+    # front_mask = pts[:, 2] < -0.1
+    front_mask = pts[:, 1] > 0.1 #正前方
+    # front_mask = pts[:, 1] < -0.1
+    # front_mask = pts[:, 0] > 0.1
+    # front_mask = pts[:, 0] < -0.1
     pts = pts[front_mask]
     if len(pts) == 0:
         return (
@@ -350,7 +358,8 @@ def run_projection_debug(
         video_start_ns = int(first_df["timestamp_ns"].iloc[0])
 
     time_window_ns = int(time_window_ms * 1_000_000)
-    out_video_path = output_dir / f"{video_path.stem}_projection_debug.mp4"
+    timestamp_tag = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+    out_video_path = output_dir / f"{video_path.stem}_projection_{timestamp_tag}}.mp4"
     writer = None
     if draw_overlay:
         writer = cv2.VideoWriter(
@@ -405,7 +414,6 @@ def run_projection_debug(
 
         # front_mask = pts_cam[:, 2] > 0.1
         # pts_cam_front = pts_cam[front_mask]
-
         # 投影
         # img_pts, _depth_z, _ = _project_camera_points(pts_cam)
         # in_image_mask = _clip_to_image(img_pts, width, height)
