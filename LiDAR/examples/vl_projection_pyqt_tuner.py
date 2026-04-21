@@ -97,9 +97,9 @@ AXIS_FILTER_THRESHOLDS = {
 R_AXIS_PRESETS: dict[str, np.ndarray] = {
     # 0) 默认候选：雷达 x 右、y 前、z 上 -> 相机 x 右、y 下、z 前
     "preset_0_x_right_y_front_z_up": np.array(
-        [[-0.747909, 0.663802, 0],
-         [-0.082236, -0.092656, -0.992296],
-         [-0.658688, -0.742147, 0.123886]],
+        [[-0.703847, 0.710352, 0.000000],
+        [-0.080507, -0.079770, -0.993557],
+        [-0.705775, -0.699312, 0.113334],],
         dtype=np.float32,
     ),
     # 1) 雷达 x 前、y 左、z 上 -> 相机 x 右、y 下、z 前
@@ -118,9 +118,9 @@ R_AXIS_PRESETS: dict[str, np.ndarray] = {
     ),
     # 3) 雷达 x 左、y 前、z 上 -> 相机 x 右、y 下、z 前
     "preset_3_x_left_y_front_z_up": np.array(
-        [[-1, 0, 0],
-         [0, 0, -1],
-         [0, 1, 0]],
+        [[-0.747909, 0.663802, 0],
+         [-0.082236, -0.092656, -0.992296],
+         [-0.658688, -0.742147, 0.123886]],
         dtype=np.float32,
     ),
     # 4) 雷达 x 前、y 右、z 上 -> 相机 x 右、y 下、z 前
@@ -182,8 +182,7 @@ def load_point_cloud(parquet_path: Path) -> PointCloudBuffer:
 
 
 def frame_time_ns(frame_idx: int, fps: float, video_start_ns: int) -> int:
-    # 视频比雷达早 10 秒，所以帧时间戳 = 计算值 - x秒纳秒
-    # return int(video_start_ns + round(frame_idx * 1_000_000_000.0 / fps) - 5_000_000_000)
+    """把帧序号换算为时间戳（ns）。"""
     return int(video_start_ns + round(frame_idx * 1_000_000_000.0 / fps))
 
 
@@ -191,20 +190,14 @@ def points_in_time_window(
     pc: PointCloudBuffer,
     center_ns: int,
     half_window_ns: int,
-) -> np.ndarray:
-    # """二分检索时间窗口内点，返回 xyz 子数组。"""
+) -> tuple[np.ndarray, np.ndarray]:
+    """按帧中心时间取时间窗口内的点。"""
     left = int(np.searchsorted(pc.timestamps_ns, center_ns - half_window_ns, side="left"))
     right = int(np.searchsorted(pc.timestamps_ns, center_ns + half_window_ns, side="right"))
 
-    # 只取时间戳 == current_frame_ns 的点
-    # left = int(np.searchsorted(pc.timestamps_ns, center_ns, side="left"))
-    # right = left + 1
-
     if right <= left:
-        # return np.empty((0, 3), dtype=np.float32)
         return np.empty((0, 3), dtype=np.float32), np.empty((0,), dtype=np.int64)
 
-    # return pc.xyz[left:right]
     return pc.xyz[left:right], pc.timestamps_ns[left:right]
 
 
@@ -410,7 +403,11 @@ class ProjectionTunerWindow(QMainWindow):
         self.frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
 
         self.pc = load_point_cloud(parquet_path)
-        self.video_start_ns = int(video_start_ns) if video_start_ns is not None else int(self.pc.timestamps_ns[0])
+        self.video_start_ns = (
+            int(video_start_ns)
+            if video_start_ns is not None
+            else int(self.pc.timestamps_ns[0] + 10_000_000_000)
+        )
 
         self.current_frame_idx = 0
         self.playing = True
@@ -826,7 +823,6 @@ class ProjectionTunerWindow(QMainWindow):
 
         frame_ns = frame_time_ns(frame_idx, self.fps, self.video_start_ns)
 
-        # xyz = points_in_time_window(self.pc, frame_ns, self.time_window_ns // 2)
         xyz, pc_ts_ns = points_in_time_window(self.pc, frame_ns, self.time_window_ns // 2)
 
         xyz = apply_axis_filter(xyz, self.axis_mode, self.r_lidar_to_cam, self.threshold_frame_mode)

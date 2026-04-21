@@ -45,8 +45,8 @@ def process_all_pcaps(
 
 
 if __name__ == "__main__":
-    input_dir = Path(r"G:\data\2025-01-12\lidar")
-    output_dir = Path(r"G:\data\2025-01-12\parquet_out_v2")
+    input_dir = Path(r"G:/data/2025-01-12/lidar")
+    output_dir = Path(r"G:/data/2025-01-12/parquet_out_v2")
 
     process_all_pcaps(
         input_dir=input_dir,
