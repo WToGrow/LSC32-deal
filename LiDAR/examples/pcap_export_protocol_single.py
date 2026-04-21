@@ -8,7 +8,8 @@ def main() -> None:
     root = Path(__file__).resolve().parents[1]
     # pcap_path = root / "source data" / "lidar_162920.pcap"
     pcap_path = Path("G:/data/2025-01-12/lidar/lidar_162920.pcap")
-    out_dir = Path("G:/data/parquet")
+    # out_dir = Path("G:/data/parquet")
+    out_dir = Path("G:/data/parquet_v2")
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
