@@ -183,6 +183,6 @@ def visualize_points(parquet_path: str, color_mode: str = "intensity"):
 if __name__ == "__main__":
     visualize_points(
         # parquet_path="G:/data/parquet/lidar_points_protocol_162920.parquet",
-        parquet_path="G:/data/2025-01-12/parquet_v2/lidar_points_protocol_162920.parquet",
+        parquet_path="G:/data/2025-01-12/parquet_out_v3/lidar_points_protocol_162920.parquet",
         color_mode="intensity",
     )

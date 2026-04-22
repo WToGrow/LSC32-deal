@@ -74,10 +74,6 @@ class MsopDecoder:
         self.vertical_sin = np.sin(self.vertical_angles_rad).astype(np.float32, copy=False)
         self.vertical_cos = np.cos(self.vertical_angles_rad).astype(np.float32, copy=False)
 
-        self.calibration = None
-
-    def set_calibration(self, calib):
-        self.calibration = calib
     def decode_packet_structured(
         self, payload: bytes, packet_time: datetime
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -104,39 +100,17 @@ class MsopDecoder:
                 continue
 
             azimuth_raw = int.from_bytes(block[2:4], byteorder=self.byteorder, signed=False)
-            
-            # azimuth_deg = azimuth_raw / 100.0
-            base_azimuth = azimuth_raw / 100.0
+            azimuth_deg = azimuth_raw / 100.0
 
             channel_data = block[4:]
-            # for ring in range(self.CHANNEL_COUNT):
-            #     offset = ring * 3
-            #     distance_raw = int.from_bytes(channel_data[offset : offset + 2], byteorder=self.byteorder, signed=False)
-            #     intensity = int(channel_data[offset + 2])
-
-            #     dists.append(distance_raw * self.distance_resolution_m)
-            #     intens.append(intensity)
-            #     azis.append(azimuth_deg)
-            #     rings.append(ring)
             for ring in range(self.CHANNEL_COUNT):
                 offset = ring * 3
                 distance_raw = int.from_bytes(channel_data[offset : offset + 2], byteorder=self.byteorder, signed=False)
                 intensity = int(channel_data[offset + 2])
 
-                # ✅ 在这里加入水平修正
-                if self.calibration is None:
-                    horiz_offset = 0.0
-                else:
-                    if ring % 2 == 0:
-                        horiz_offset = self.calibration.A1 if ring < 16 else self.calibration.A3
-                    else:
-                        horiz_offset = self.calibration.A2 if ring < 16 else self.calibration.A4
-
-                azimuth_deg = base_azimuth + horiz_offset
-
                 dists.append(distance_raw * self.distance_resolution_m)
                 intens.append(intensity)
-                azis.append(azimuth_deg)   # ✅ 改这里
+                azis.append(azimuth_deg)
                 rings.append(ring)
 
         n = len(dists)
@@ -158,51 +132,7 @@ class MsopDecoder:
         )
 
 
-@dataclass(slots=True)
-class DifopCalibration:
-    A1: float
-    A2: float
-    A3: float
-    A4: float
 
-
-class DifopDecoder:
-    DIFOP_PORT = 2369
-    PAYLOAD_LEN = 1206
-
-    HEADER_MAGIC = b"\xA5\x0F\xFF\x00"
-    TAIL_MAGIC = b"\x0F\x0F"
-
-    def __init__(self):
-        self.calibration: DifopCalibration | None = None
-
-    def parse(self, payload: bytes) -> DifopCalibration | None:
-        if len(payload) != self.PAYLOAD_LEN:
-            return None
-
-        # # 校验 Header
-        # if payload[0:4] != self.HEADER_MAGIC:
-        #     return None
-
-        # 只校验前2字节（更稳）
-        if payload[0] != 0xA5 or payload[1] != 0x0F:
-            return None
-
-        # 校验 Tail
-        if payload[-2:] != self.TAIL_MAGIC:
-            return None
-
-        # ⚠️ 大端解析
-        def be(offset):
-            return int.from_bytes(payload[offset:offset+2], "big", signed=True)
-
-        A1 = be(186) * 0.33
-        A3 = be(188) * 0.33
-        A2 = be(190) * 0.33
-        A4 = be(192) * 0.33
-
-        self.calibration = DifopCalibration(A1, A2, A3, A4)
-        return self.calibration
 
 class ProtocolPcapParser:
     """Pure binary protocol parser for LiDAR UDP packets (MSOP-only, GPU-accelerated math)."""
@@ -330,7 +260,6 @@ class ProtocolPcapParser:
         return src_port, dst_port, payload
 
     def iter_udp_packets(self, pcap_path: str | Path) -> Iterator[tuple[datetime, int, int, bytes]]:
-        self.difop_decoder = DifopDecoder()
         path = Path(pcap_path)
         with path.open("rb") as f:
             global_hdr = f.read(24)
@@ -366,55 +295,17 @@ class ProtocolPcapParser:
                 yield pkt_time, src_port, dst_port, payload
 
     def _iter_msop_payloads(self, pcap_path: str | Path) -> Iterator[tuple[datetime, bytes]]:
-        # for pkt_time, src_port, dst_port, payload in self.iter_udp_packets(pcap_path):
-            
-        #     # ========= DIFOP =========
-        #     # if src_port == 2369 or dst_port == 2369:
-        #     #     calib = self.difop_decoder.parse(payload)
-        #     #     continue
-        #     if src_port == 2369 or dst_port == 2369:
-        #         calib = self.difop_decoder.parse(payload)
-        #         if calib:
-        #             self.decoder.set_calibration(calib)
-        #         continue
-
-        #     is_msop = src_port == self.MSOP_PORT or dst_port == self.MSOP_PORT
-        #     if not is_msop:
-        #         continue
-
-        #     self._stats["hit_2368_packets"] += 1
-        #     if len(payload) == self.decoder.MSOP_PAYLOAD_LENGTH:
-        #         self._stats["payload_len_1206_packets"] += 1
-        #         yield pkt_time, payload
-        #     else:
-        #         self._stats["length_filtered_packets"] += 1
         for pkt_time, src_port, dst_port, payload in self.iter_udp_packets(pcap_path):
-            # is_msop = src_port == self.MSOP_PORT or dst_port == self.MSOP_PORT
-            # is_difop = src_port == self.difop_decoder.DIFOP_PORT or dst_port == self.difop_decoder.DIFOP_PORT
-
-            is_difop = (src_port == 2368 and dst_port == 2369)
-            is_msop  = (src_port == 2369 and dst_port == 2368)
-
-            # ========= DIFOP =========
-            if is_difop:
-                # print("DIFOP HIT:", len(payload), payload[:8].hex())
-                calib = self.difop_decoder.parse(payload)
-                if calib:
-                    self.decoder.set_calibration(calib)
-                continue
-
-            # ========= MSOP =========
+            is_msop = src_port == self.MSOP_PORT or dst_port == self.MSOP_PORT
             if not is_msop:
                 continue
 
             self._stats["hit_2368_packets"] += 1
-
             if len(payload) == self.decoder.MSOP_PAYLOAD_LENGTH:
                 self._stats["payload_len_1206_packets"] += 1
                 yield pkt_time, payload
             else:
                 self._stats["length_filtered_packets"] += 1
-
 
     def _transform_and_filter(
         self,
@@ -528,21 +419,6 @@ class ProtocolPcapParser:
         df_chunk = make_chunk()
         if df_chunk is not None:
             yield df_chunk
-
-
-    def get_horizontal_offset(self, ring: int) -> float:
-        if self.difop_decoder.calibration is None:
-            return 0.0
-
-        A1 = self.difop_decoder.calibration.A1
-        A2 = self.difop_decoder.calibration.A2
-        A3 = self.difop_decoder.calibration.A3
-        A4 = self.difop_decoder.calibration.A4
-
-        if ring % 2 == 0:  # 左列
-            return A1 if ring < 16 else A3
-        else:              # 右列
-            return A2 if ring < 16 else A4
 
     def parse_points_dataframe(self, pcap_path: str | Path) -> pd.DataFrame:
         """Parse MSOP packets into a point dataframe."""
@@ -672,205 +548,204 @@ class ProtocolPcapParser:
 
         raise ValueError("bin_mode must be 'kitti' or 'full_float64'")
 
-    # # def export_full_fields(
-    # #     self,
-    # #     pcap_path: str | Path,
-    # #     out_stem: str | Path,
-    # #     formats: tuple[str, ...] = ("parquet", "bin"),
-    # #     bin_mode: str = "kitti",
-    # #     flush_points: int = 500_000,
-    # # ) -> dict[str, Path]:
-    #     fmt_set = {f.lower() for f in formats}
-    #     invalid = fmt_set - self.VALID_FULL_EXPORT_FORMATS
-    #     if invalid:
-    #         raise ValueError(f"unsupported formats: {sorted(invalid)}")
+    def export_full_fields(
+        self,
+        pcap_path: str | Path,
+        out_stem: str | Path,
+        formats: tuple[str, ...] = ("parquet", "bin"),
+        bin_mode: str = "kitti",
+        flush_points: int = 500_000,
+    ) -> dict[str, Path]:
+        fmt_set = {f.lower() for f in formats}
+        invalid = fmt_set - self.VALID_FULL_EXPORT_FORMATS
+        if invalid:
+            raise ValueError(f"unsupported formats: {sorted(invalid)}")
 
-    #     stem = Path(out_stem)
-    #     stem.parent.mkdir(parents=True, exist_ok=True)
+        stem = Path(out_stem)
+        stem.parent.mkdir(parents=True, exist_ok=True)
 
-    #     outputs: dict[str, Path] = {}
-    #     out_parquet_path = stem.with_suffix(".parquet") if "parquet" in fmt_set else None
-    #     out_bin_path = stem.with_suffix(".bin") if "bin" in fmt_set else None
+        outputs: dict[str, Path] = {}
+        out_parquet_path = stem.with_suffix(".parquet") if "parquet" in fmt_set else None
+        out_bin_path = stem.with_suffix(".bin") if "bin" in fmt_set else None
 
-    #     if out_parquet_path is not None:
-    #         outputs["parquet"] = out_parquet_path
-    #     if out_bin_path is not None:
-    #         outputs["bin"] = out_bin_path
-    #         out_bin_path.write_bytes(b"")
+        if out_parquet_path is not None:
+            outputs["parquet"] = out_parquet_path
+        if out_bin_path is not None:
+            outputs["bin"] = out_bin_path
+            out_bin_path.write_bytes(b"")
 
-    #     parquet_writer: pq.ParquetWriter | None = None
+        parquet_writer: pq.ParquetWriter | None = None
 
-    #     packet_timestamp_ns_vals: list[int] = []
-    #     src_port_vals: list[int] = []
-    #     dst_port_vals: list[int] = []
-    #     packet_index_vals: list[int] = []
-    #     block_index_vals: list[int] = []
-    #     block_flag_hex_vals: list[str] = []
-    #     azimuth_raw_vals: list[int] = []
-    #     azimuth_deg_vals: list[float] = []
-    #     ring_vals: list[int] = []
-    #     distance_raw_vals: list[int] = []
-    #     distance_m_vals: list[float] = []
-    #     intensity_vals: list[int] = []
-    #     vertical_angle_deg_vals: list[float] = []
-    #     x_vals: list[float] = []
-    #     y_vals: list[float] = []
-    #     z_vals: list[float] = []
+        packet_timestamp_ns_vals: list[int] = []
+        src_port_vals: list[int] = []
+        dst_port_vals: list[int] = []
+        packet_index_vals: list[int] = []
+        block_index_vals: list[int] = []
+        block_flag_hex_vals: list[str] = []
+        azimuth_raw_vals: list[int] = []
+        azimuth_deg_vals: list[float] = []
+        ring_vals: list[int] = []
+        distance_raw_vals: list[int] = []
+        distance_m_vals: list[float] = []
+        intensity_vals: list[int] = []
+        vertical_angle_deg_vals: list[float] = []
+        x_vals: list[float] = []
+        y_vals: list[float] = []
+        z_vals: list[float] = []
 
-    #     def clear_buffers() -> None:
-    #         packet_timestamp_ns_vals.clear()
-    #         src_port_vals.clear()
-    #         dst_port_vals.clear()
-    #         packet_index_vals.clear()
-    #         block_index_vals.clear()
-    #         block_flag_hex_vals.clear()
-    #         azimuth_raw_vals.clear()
-    #         azimuth_deg_vals.clear()
-    #         ring_vals.clear()
-    #         distance_raw_vals.clear()
-    #         distance_m_vals.clear()
-    #         intensity_vals.clear()
-    #         vertical_angle_deg_vals.clear()
-    #         x_vals.clear()
-    #         y_vals.clear()
-    #         z_vals.clear()
+        def clear_buffers() -> None:
+            packet_timestamp_ns_vals.clear()
+            src_port_vals.clear()
+            dst_port_vals.clear()
+            packet_index_vals.clear()
+            block_index_vals.clear()
+            block_flag_hex_vals.clear()
+            azimuth_raw_vals.clear()
+            azimuth_deg_vals.clear()
+            ring_vals.clear()
+            distance_raw_vals.clear()
+            distance_m_vals.clear()
+            intensity_vals.clear()
+            vertical_angle_deg_vals.clear()
+            x_vals.clear()
+            y_vals.clear()
+            z_vals.clear()
 
-    #     def flush_buffers() -> None:
-    #         nonlocal parquet_writer
-    #         n = len(x_vals)
-    #         if n == 0:
-    #             return
+        def flush_buffers() -> None:
+            nonlocal parquet_writer
+            n = len(x_vals)
+            if n == 0:
+                return
 
-    #         if out_parquet_path is not None:
-    #             packet_ts_str = pd.to_datetime(np.asarray(packet_timestamp_ns_vals, dtype=np.int64), unit="ns", utc=True).astype(str)
-    #             df_chunk = pd.DataFrame(
-    #                 {
-    #                     "packet_timestamp": packet_ts_str,
-    #                     "src_port": np.asarray(src_port_vals, dtype=np.int32),
-    #                     "dst_port": np.asarray(dst_port_vals, dtype=np.int32),
-    #                     "packet_index": np.asarray(packet_index_vals, dtype=np.int64),
-    #                     "block_index": np.asarray(block_index_vals, dtype=np.int16),
-    #                     "block_flag_hex": block_flag_hex_vals,
-    #                     "azimuth_raw": np.asarray(azimuth_raw_vals, dtype=np.int32),
-    #                     "azimuth_deg": np.asarray(azimuth_deg_vals, dtype=np.float32),
-    #                     "ring": np.asarray(ring_vals, dtype=np.int16),
-    #                     "distance_raw": np.asarray(distance_raw_vals, dtype=np.int32),
-    #                     "distance_m": np.asarray(distance_m_vals, dtype=np.float32),
-    #                     "intensity": np.asarray(intensity_vals, dtype=np.uint8),
-    #                     "vertical_angle_deg": np.asarray(vertical_angle_deg_vals, dtype=np.float32),
-    #                     "x": np.asarray(x_vals, dtype=np.float32),
-    #                     "y": np.asarray(y_vals, dtype=np.float32),
-    #                     "z": np.asarray(z_vals, dtype=np.float32),
-    #                 },
-    #                 columns=self.FULL_FIELD_COLUMNS,
-    #             )
-    #             table = pa.Table.from_pandas(df_chunk, preserve_index=False)
-    #             if parquet_writer is None:
-    #                 parquet_writer = pq.ParquetWriter(out_parquet_path, table.schema)
-    #             parquet_writer.write_table(table)
+            if out_parquet_path is not None:
+                packet_ts_str = pd.to_datetime(np.asarray(packet_timestamp_ns_vals, dtype=np.int64), unit="ns", utc=True).astype(str)
+                df_chunk = pd.DataFrame(
+                    {
+                        "packet_timestamp": packet_ts_str,
+                        "src_port": np.asarray(src_port_vals, dtype=np.int32),
+                        "dst_port": np.asarray(dst_port_vals, dtype=np.int32),
+                        "packet_index": np.asarray(packet_index_vals, dtype=np.int64),
+                        "block_index": np.asarray(block_index_vals, dtype=np.int16),
+                        "block_flag_hex": block_flag_hex_vals,
+                        "azimuth_raw": np.asarray(azimuth_raw_vals, dtype=np.int32),
+                        "azimuth_deg": np.asarray(azimuth_deg_vals, dtype=np.float32),
+                        "ring": np.asarray(ring_vals, dtype=np.int16),
+                        "distance_raw": np.asarray(distance_raw_vals, dtype=np.int32),
+                        "distance_m": np.asarray(distance_m_vals, dtype=np.float32),
+                        "intensity": np.asarray(intensity_vals, dtype=np.uint8),
+                        "vertical_angle_deg": np.asarray(vertical_angle_deg_vals, dtype=np.float32),
+                        "x": np.asarray(x_vals, dtype=np.float32),
+                        "y": np.asarray(y_vals, dtype=np.float32),
+                        "z": np.asarray(z_vals, dtype=np.float32),
+                    },
+                    columns=self.FULL_FIELD_COLUMNS,
+                )
+                table = pa.Table.from_pandas(df_chunk, preserve_index=False)
+                if parquet_writer is None:
+                    parquet_writer = pq.ParquetWriter(out_parquet_path, table.schema)
+                parquet_writer.write_table(table)
 
-    #         if out_bin_path is not None:
-    #             self._append_columns_to_bin(
-    #                 out_bin_path=out_bin_path,
-    #                 bin_mode=bin_mode,
-    #                 x_vals=x_vals,
-    #                 y_vals=y_vals,
-    #                 z_vals=z_vals,
-    #                 intensity_vals=intensity_vals,
-    #                 packet_index_vals=packet_index_vals,
-    #                 block_index_vals=block_index_vals,
-    #                 src_port_vals=src_port_vals,
-    #                 dst_port_vals=dst_port_vals,
-    #                 azimuth_raw_vals=azimuth_raw_vals,
-    #                 azimuth_deg_vals=azimuth_deg_vals,
-    #                 ring_vals=ring_vals,
-    #                 distance_raw_vals=distance_raw_vals,
-    #                 distance_m_vals=distance_m_vals,
-    #                 vertical_angle_deg_vals=vertical_angle_deg_vals,
-    #             )
+            if out_bin_path is not None:
+                self._append_columns_to_bin(
+                    out_bin_path=out_bin_path,
+                    bin_mode=bin_mode,
+                    x_vals=x_vals,
+                    y_vals=y_vals,
+                    z_vals=z_vals,
+                    intensity_vals=intensity_vals,
+                    packet_index_vals=packet_index_vals,
+                    block_index_vals=block_index_vals,
+                    src_port_vals=src_port_vals,
+                    dst_port_vals=dst_port_vals,
+                    azimuth_raw_vals=azimuth_raw_vals,
+                    azimuth_deg_vals=azimuth_deg_vals,
+                    ring_vals=ring_vals,
+                    distance_raw_vals=distance_raw_vals,
+                    distance_m_vals=distance_m_vals,
+                    vertical_angle_deg_vals=vertical_angle_deg_vals,
+                )
 
-    #         clear_buffers()
+            clear_buffers()
 
-    #     packet_index = 0
-    #     try:
-    #         for pkt_time, src_port, dst_port, payload in self.iter_udp_packets(pcap_path):
-    #             packet_index += 1
+        packet_index = 0
+        try:
+            for pkt_time, src_port, dst_port, payload in self.iter_udp_packets(pcap_path):
+                packet_index += 1
 
-    #             is_msop = src_port == self.MSOP_PORT or dst_port == self.MSOP_PORT
-    #             if not is_msop or len(payload) != self.decoder.MSOP_PAYLOAD_LENGTH:
-    #                 continue
+                is_msop = src_port == self.MSOP_PORT or dst_port == self.MSOP_PORT
+                if not is_msop or len(payload) != self.decoder.MSOP_PAYLOAD_LENGTH:
+                    continue
 
-    #             ts_ns = int(pkt_time.timestamp() * 1_000_000_000)
-    #             blocks = payload[: self.decoder.BLOCK_COUNT * self.decoder.BLOCK_SIZE]
+                ts_ns = int(pkt_time.timestamp() * 1_000_000_000)
+                blocks = payload[: self.decoder.BLOCK_COUNT * self.decoder.BLOCK_SIZE]
 
-    #             for block_idx in range(self.decoder.BLOCK_COUNT):
-    #                 start = block_idx * self.decoder.BLOCK_SIZE
-    #                 block = blocks[start : start + self.decoder.BLOCK_SIZE]
-    #                 block_flag = block[0:2]
-    #                 if block_flag != self.decoder.BLOCK_HEADER:
-    #                     continue
+                for block_idx in range(self.decoder.BLOCK_COUNT):
+                    start = block_idx * self.decoder.BLOCK_SIZE
+                    block = blocks[start : start + self.decoder.BLOCK_SIZE]
+                    block_flag = block[0:2]
+                    if block_flag != self.decoder.BLOCK_HEADER:
+                        continue
 
-    #                 azimuth_raw = int.from_bytes(block[2:4], byteorder=self.decoder.byteorder, signed=False)
-    #                 azimuth_deg = azimuth_raw / 100.0
+                    azimuth_raw = int.from_bytes(block[2:4], byteorder=self.decoder.byteorder, signed=False)
+                    azimuth_deg = azimuth_raw / 100.0
+                    az_rad = math.radians(azimuth_deg)
+                    cos_az = math.cos(az_rad)
+                    sin_az = math.sin(az_rad)
+                    block_flag_hex = block_flag.hex()
 
-    #                 az_rad = math.radians(azimuth_deg)
-    #                 cos_az = math.cos(az_rad)
-    #                 sin_az = math.sin(az_rad)
-    #                 block_flag_hex = block_flag.hex()
+                    channel_data = block[4:]
+                    for ring in range(self.decoder.CHANNEL_COUNT):
+                        offset = ring * 3
+                        distance_raw = int.from_bytes(
+                            channel_data[offset : offset + 2],
+                            byteorder=self.decoder.byteorder,
+                            signed=False,
+                        )
+                        intensity = int(channel_data[offset + 2])
+                        distance_m = distance_raw * self.decoder.distance_resolution_m
 
-    #                 channel_data = block[4:]
-    #                 for ring in range(self.decoder.CHANNEL_COUNT):
-    #                     offset = ring * 3
-    #                     distance_raw = int.from_bytes(
-    #                         channel_data[offset : offset + 2],
-    #                         byteorder=self.decoder.byteorder,
-    #                         signed=False,
-    #                     )
-    #                     intensity = int(channel_data[offset + 2])
-    #                     distance_m = distance_raw * self.decoder.distance_resolution_m
+                        if distance_m < self.decoder.min_distance_m or distance_m > self.decoder.max_distance_m:
+                            continue
 
-    #                     if distance_m < self.decoder.min_distance_m or distance_m > self.decoder.max_distance_m:
-    #                         continue
+                        vertical_angle_deg = float(self.decoder.vertical_angles_deg[ring])
+                        cos_v = float(self.decoder.vertical_cos[ring])
+                        sin_v = float(self.decoder.vertical_sin[ring])
 
-    #                     vertical_angle_deg = float(self.decoder.vertical_angles_deg[ring])
-    #                     cos_v = float(self.decoder.vertical_cos[ring])
-    #                     sin_v = float(self.decoder.vertical_sin[ring])
+                        x = distance_m * cos_v * cos_az
+                        y = distance_m * cos_v * sin_az
+                        z = distance_m * sin_v
 
-    #                     x = distance_m * cos_v * cos_az
-    #                     y = distance_m * cos_v * sin_az
-    #                     z = distance_m * sin_v
+                        packet_timestamp_ns_vals.append(ts_ns)
+                        src_port_vals.append(int(src_port))
+                        dst_port_vals.append(int(dst_port))
+                        packet_index_vals.append(packet_index)
+                        block_index_vals.append(block_idx)
+                        block_flag_hex_vals.append(block_flag_hex)
+                        azimuth_raw_vals.append(azimuth_raw)
+                        azimuth_deg_vals.append(azimuth_deg)
+                        ring_vals.append(ring)
+                        distance_raw_vals.append(distance_raw)
+                        distance_m_vals.append(distance_m)
+                        intensity_vals.append(intensity)
+                        vertical_angle_deg_vals.append(vertical_angle_deg)
+                        x_vals.append(x)
+                        y_vals.append(y)
+                        z_vals.append(z)
 
-    #                     packet_timestamp_ns_vals.append(ts_ns)
-    #                     src_port_vals.append(int(src_port))
-    #                     dst_port_vals.append(int(dst_port))
-    #                     packet_index_vals.append(packet_index)
-    #                     block_index_vals.append(block_idx)
-    #                     block_flag_hex_vals.append(block_flag_hex)
-    #                     azimuth_raw_vals.append(azimuth_raw)
-    #                     azimuth_deg_vals.append(azimuth_deg)
-    #                     ring_vals.append(ring)
-    #                     distance_raw_vals.append(distance_raw)
-    #                     distance_m_vals.append(distance_m)
-    #                     intensity_vals.append(intensity)
-    #                     vertical_angle_deg_vals.append(vertical_angle_deg)
-    #                     x_vals.append(x)
-    #                     y_vals.append(y)
-    #                     z_vals.append(z)
+                if len(x_vals) >= flush_points:
+                    flush_buffers()
 
-    #             if len(x_vals) >= flush_points:
-    #                 flush_buffers()
+            flush_buffers()
 
-    #         flush_buffers()
+            if out_parquet_path is not None and parquet_writer is None:
+                empty_df = pd.DataFrame(columns=self.FULL_FIELD_COLUMNS)
+                empty_df.to_parquet(out_parquet_path, index=False)
 
-    #         if out_parquet_path is not None and parquet_writer is None:
-    #             empty_df = pd.DataFrame(columns=self.FULL_FIELD_COLUMNS)
-    #             empty_df.to_parquet(out_parquet_path, index=False)
+        finally:
+            if parquet_writer is not None:
+                parquet_writer.close()
 
-    #     finally:
-    #         if parquet_writer is not None:
-    #             parquet_writer.close()
-
-    #     return outputs
+        return outputs
 
     def export_parse_points(self, pcap_path: str | Path, out_path: str | Path, fmt: str = "parquet") -> Path:
         """Export parsed points to parquet."""
