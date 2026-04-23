@@ -70,6 +70,11 @@ DEFAULT_R_LIDAR_TO_CAM = np.array(
         [-0.629838, 0.776726, 0.000000],
         [0.004426, 0.003589, -0.999984],
         [-0.776714, -0.629828, -0.005698],
+
+        # 6、修复水平后的parquet，静止时对齐
+        # [-0.708285,  0.705927,  0.000000],
+        # [-0.026790, -0.026880, -0.999280],
+        # [-0.705418, -0.707775,  0.037951],
     ],
     dtype=np.float32,
 )
@@ -98,9 +103,14 @@ DEFAULT_T_WORLD_TO_CAM = np.array(
         # [4.79],
 
         # 5、
-        [-0.77],
+        [-0.50],
         [0.27],
         [13.91],
+
+        # 6、
+        # [-0.94],
+        # [0.65],
+        # [4.55],
 
     ],
     dtype=np.float32
@@ -203,8 +213,12 @@ def _project_camera_points(points_cam: np.ndarray, front_axis: str = "z") -> tup
         )
 
     pts = np.asarray(points_cam, dtype=np.float32)
-    axis_idx = {"x": 0, "y": 1, "z": 2}.get(front_axis, 2)
-    front_mask = pts[:, axis_idx] > 0.1
+    axis_idx = {"x": 0, "y": 1, "z": 2}.get(front_axis)
+
+    # front_mask = pts[:, axis_idx] > 0.1
+
+    front_mask = pts[:, 2] > 0.1
+
     pts = pts[front_mask]
     if len(pts) == 0:
         return (
@@ -219,12 +233,14 @@ def _project_camera_points(points_cam: np.ndarray, front_axis: str = "z") -> tup
     # 3) 内参映射到像素坐标
     img_pts, _ = cv2.projectPoints(pts, np.zeros((3, 1), dtype=np.float32), np.zeros((3, 1), dtype=np.float32), CAMERA_MATRIX, DIST_COEFFS)
     img_pts = img_pts.reshape(-1, 2)
-    depth_z = pts[:, 2].copy()
+
+    # depth_z = pts[:, 2].copy()
+    depth = np.linalg.norm(pts, axis=1)
 
     # finite = np.isfinite(img_pts).all(axis=1)
     # return img_pts[finite], depth_z[finite], front_mask
     # ============修复：不移除 finite 点，保证长度和 front_mask 匹配=================
-    return img_pts, depth_z, front_mask
+    return img_pts, depth, front_mask
 
 
 def _bbox_int(points_uv: np.ndarray) -> Optional[tuple[int, int, int, int]]:
@@ -261,30 +277,60 @@ def _normalize_with_percentile(values: np.ndarray, low: float = 1.0, high: float
     return np.clip((values - v_min) / (v_max - v_min), 0.0, 1.0).astype(np.float32)
 
 
-def _color_by_depth(depth: np.ndarray) -> np.ndarray:
-    """按距离生成更接近 visualize_single.py 的亮色渐变 BGR。"""
+# def _color_by_depth(depth: np.ndarray) -> np.ndarray:
+#     """按相对离生成更接近 visualize_single.py 的亮色渐变 BGR。"""
+#     if len(depth) == 0:
+#         return np.empty((0, 3), dtype=np.uint8)
+
+#     norm = _normalize_with_percentile(depth)
+#     palette = np.array(
+#         [
+#             [255, 255, 0],   # 青蓝/黄系过渡
+#             [128, 255, 0],   # 亮绿
+#             [0, 255, 0],     # 绿
+#             [0, 255, 128],   # 青绿
+#             [0, 255, 255],   # 黄
+#             [0, 165, 255],   # 橙
+#             [0, 0, 255],     # 红
+#         ],
+#         dtype=np.float32,
+#     )
+#     scaled = norm * (len(palette) - 1)
+#     left = np.floor(scaled).astype(np.int32)
+#     right = np.clip(left + 1, 0, len(palette) - 1)
+#     weight = (scaled - left).reshape(-1, 1)
+#     colors = palette[left] * (1.0 - weight) + palette[right] * weight
+#     colors = np.clip(colors * 1.05, 0, 255)
+#     return colors.astype(np.uint8)
+
+def _color_by_depth(depth: np.ndarray, max_dist: float = 80.0) -> np.ndarray:
+    """
+    按绝对距离上色（稳定，不随帧变化）
+    depth: z or 欧氏距离（建议欧氏）
+    """
+
     if len(depth) == 0:
         return np.empty((0, 3), dtype=np.uint8)
 
-    norm = _normalize_with_percentile(depth)
-    palette = np.array(
-        [
-            [255, 255, 0],   # 青蓝/黄系过渡
-            [128, 255, 0],   # 亮绿
-            [0, 255, 0],     # 绿
-            [0, 255, 128],   # 青绿
-            [0, 255, 255],   # 黄
-            [0, 165, 255],   # 橙
-            [0, 0, 255],     # 红
-        ],
-        dtype=np.float32,
-    )
+    # ✅ 关键：固定归一化
+    norm = np.clip(depth / max_dist, 0.0, 1.0)
+
+    # 渐变：红 → 黄 → 绿 → 青 → 蓝
+    palette = np.array([
+        [0, 0, 255],     # 红
+        [0, 165, 255],   # 橙
+        [0, 255, 255],   # 黄
+        [0, 255, 0],     # 绿
+        [255, 255, 0],   # 青
+        [255, 0, 0],     # 蓝
+    ], dtype=np.float32)
+
     scaled = norm * (len(palette) - 1)
     left = np.floor(scaled).astype(np.int32)
     right = np.clip(left + 1, 0, len(palette) - 1)
     weight = (scaled - left).reshape(-1, 1)
+
     colors = palette[left] * (1.0 - weight) + palette[right] * weight
-    colors = np.clip(colors * 1.05, 0, 255)
     return colors.astype(np.uint8)
 
 
@@ -542,7 +588,7 @@ def run_projection(config: ProjectionConfig) -> Path | None:
                 writer.write(frame)
             continue
 
-        # ========= 图像掩码过滤 =========
+        # # ========= 图像掩码过滤 =========
         mask_img = _compute_image_mask(frame)
 
         valid_mask = []
@@ -562,7 +608,7 @@ def run_projection(config: ProjectionConfig) -> Path | None:
                 writer.write(frame)
             continue
 
-        # ========= 颜色一致性过滤 =========
+        # # ========= 颜色一致性过滤 =========
         color_mask = _color_consistency_filter(frame, img_pts_in)
 
         img_pts_in = img_pts_in[color_mask]
@@ -600,14 +646,92 @@ def run_projection(config: ProjectionConfig) -> Path | None:
                 writer.write(frame)
             continue
 
-        # ========= 绘制 =========
-        draw_pts = img_pts_in.astype(np.int32, copy=False)
-        colors = _color_by_depth(depth_in)
+        # # ========= 绘制 =========
+        # draw_pts = img_pts_in.astype(np.int32, copy=False)
+        # colors = _color_by_depth(depth_in)
 
-        for (u, v), c in zip(draw_pts, colors):
-            if 0 <= u < width and 0 <= v < height:
-                cv2.circle(frame, (u, v), 2, (int(c[0]), int(c[1]), int(c[2])), -1)
+        # for (u, v), c in zip(draw_pts, colors):
+        #     if 0 <= u < width and 0 <= v < height:
+        #         cv2.circle(frame, (u, v), 2, (int(c[0]), int(c[1]), int(c[2])), -1)
 
+        # # ========= 深度优先（Z-buffer） =========
+        # z_buffer = {}
+
+        # for (u, v), d in zip(img_pts_in.astype(np.int32), depth_in):
+        #     key = (u, v)
+
+        #     # 只保留更近的点（depth更小）
+        #     if key not in z_buffer or d < z_buffer[key]:
+        #         z_buffer[key] = d
+
+        # if len(z_buffer) == 0:
+        #     if writer:
+        #         writer.write(frame)
+        #     continue
+
+        # # 转回数组
+        # draw_pts = np.array(list(z_buffer.keys()), dtype=np.int32)
+        # depth_draw = np.array(list(z_buffer.values()), dtype=np.float32)
+
+        # colors = _color_by_depth(depth_draw)
+
+        # # ========= 绘制 =========
+        # for (u, v), c in zip(draw_pts, colors):
+        #     if 0 <= u < width and 0 <= v < height:
+        #         cv2.circle(frame, (u, v), 2, (int(c[0]), int(c[1]), int(c[2])), -1)
+
+
+        # ========= 分层（近 / 远） =========
+        z_cam = pts_cam_front[:, 2]
+
+        # 同步mask
+        z_cam = z_cam[in_image_mask]
+        z_cam = z_cam[valid_mask]
+        z_cam = z_cam[color_mask]
+        z_cam = z_cam[temporal_mask]
+        
+        near_mask = pts_cam_front[:, 2][in_image_mask][valid_mask][color_mask][temporal_mask] > 15
+
+        img_near = img_pts_in[near_mask]
+        depth_near = depth_in[near_mask]
+
+        img_far = img_pts_in[~near_mask]
+        depth_far = depth_in[~near_mask]
+
+
+        def zbuffer(points_uv, depth):
+            zb = {}
+            for (u, v), d in zip(points_uv.astype(np.int32), depth):
+                key = (u, v)
+                if key not in zb or d < zb[key]:
+                    zb[key] = d
+            if len(zb) == 0:
+                return None, None
+            pts = np.array(list(zb.keys()), dtype=np.int32)
+            dep = np.array(list(zb.values()), dtype=np.float32)
+            return pts, dep
+
+
+        # ========= 远点先画 =========
+        far_pts, far_depth = zbuffer(img_far, depth_far)
+
+        if far_pts is not None:
+            colors_far = _color_by_depth(far_depth)
+            for (u, v), c in zip(far_pts, colors_far):
+                if 0 <= u < width and 0 <= v < height:
+                    cv2.circle(frame, (u, v), 2, (int(c[0]), int(c[1]), int(c[2])), -1)
+
+
+        # ========= 近点后画（覆盖） =========
+        near_pts, near_depth = zbuffer(img_near, depth_near)
+
+        if near_pts is not None:
+            colors_near = _color_by_depth(near_depth)
+            for (u, v), c in zip(near_pts, colors_near):
+                if 0 <= u < width and 0 <= v < height:
+                    cv2.circle(frame, (u, v), 2, (int(c[0]), int(c[1]), int(c[2])), -1)
+        
+        
         if writer is not None:
             writer.write(frame)
 

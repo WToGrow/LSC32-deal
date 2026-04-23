@@ -1,27 +1,23 @@
-# ICV LiDAR Tools 项目说明
+# ICV LiDAR Tools
 
-## 1. 项目简介
+`ICV LiDAR Tools` 是一个面向 LiDAR/视频融合实验的数据处理工具集，主要用于：
 
-本项目是一个围绕 LiDAR 点云、PCAP 协议解析、Parquet 导出、点云可视化以及 LiDAR-视频投影融合的 Python 工具集合。
+- 解析 `pcap` 协议数据并导出结构化点云
+- 将 `parquet` 点云转换为 `csv`
+- 对点云进行单帧/首场景可视化
+- 将 LiDAR 点投影到视频帧上进行融合检查
+- 对时间戳数据做最近邻对齐
 
-项目代码主要分为两部分：
+项目以 Python 为主，代码分为两部分：
 
-- `src/icv_lidar_tools/`：可安装的工具包源码，提供解析、对齐、可视化等基础能力
-- `examples/`：各类脚本示例、调试脚本、实验脚本和投影脚本
-
-适用场景：
-
-- 解析雷达 `pcap` 数据并导出为 `parquet` / `bin`
-- 将点云转换为 CSV
-- 按时间戳对齐 GNSS / 其他传感器数据
-- 可视化单帧或首个场景点云
-- 将 LiDAR 点投影到视频帧上进行融合查看
+- `src/icv_lidar_tools/`：可安装的库源码
+- `examples/`：各种脚本、调试脚本和实验脚本
 
 ---
 
-## 2. 目录总览
+## 项目结构
 
-仓库扫描到的主要文件如下（不含 `.idea/` 等 IDE 配置目录）：
+当前与功能相关的主要文件如下：
 
 - `pyproject.toml`
 - `src/icv_lidar_tools/__init__.py`
@@ -32,27 +28,23 @@
 - `src/icv_lidar_tools/lidar/__init__.py`
 - `src/icv_lidar_tools/lidar/pcap_parser_protocol.py`
 - `examples/vl_projection.py`
-- `examples/vl_projection_s.py`
-- `examples/vl_projection acc.py`
 - `examples/vl_projection_pyqt_tuner.py`
-- `examples/vl_first_frame_check.py`
 - `examples/video_rename.py`
 - `examples/query.py`
 - `examples/pcap_export_protocol_single.py`
+- `examples/pcap_export_protocol_all.py`
 - `examples/visualization_bin_points.py`
 - `examples/demo_protocol_full_fields_export.py`
 
+
 ---
 
-## 3. 项目依赖与安装
+## 环境要求
 
-### 3.1 Python 版本
+- Python `3.10+`
+- Windows 10 / Windows 11
 
-项目在 `pyproject.toml` 中要求：
-
-- `Python >= 3.10`
-
-### 3.2 主要依赖
+`pyproject.toml` 中声明的基础依赖包括：
 
 - `numpy`
 - `pandas`
@@ -61,98 +53,48 @@
 - `matplotlib`
 - `scapy`
 
-其中部分脚本还会用到：
+部分脚本还会用到以下可选依赖：
 
-- `opencv-python`（视频叠加投影）
-- `open3d`（点云可视化）
+- `open3d`：点云可视化
+- `opencv-python`：视频读取与投影叠加
+- `PyQt` / `PySide`：交互式调参界面
+- `cupy`：部分解析流程中可能用于 GPU 加速
 
-> 注：`open3d` 和 `opencv-python` 目前未写在 `pyproject.toml` 的基础依赖里，但从源码看某些示例脚本是需要它们的。
-
-### 3.3 安装方式
-
-在项目根目录执行：
+建议安装方式：
 
 ```bash
 pip install -e .
 ```
 
-如果你需要运行可视化或视频投影脚本，建议额外安装：
+如果你要运行可视化或视频投影脚本，再补充安装：
 
 ```bash
-pip install opencv-python open3d
+pip install open3d opencv-python
 ```
 
 ---
 
-## 4. 核心源码说明
+## 核心功能说明
 
-### 4.1 `src/icv_lidar_tools/__init__.py`
+### 1. `src/icv_lidar_tools/time_sync.py`
 
-作用：
-
-- 定义包入口
-- 暴露可直接导入的类
-
-当前导出：
-
-- `TimeAligner`
-
-文件内容很短，主要用于包级别引用。
-
----
-
-### 4.2 `src/icv_lidar_tools/models.py`
-
-作用：
-
-- 定义项目中的数据结构
-
-主要内容：
-
-- `LidarPoint`
-
-字段：
-
-- `timestamp`: 时间戳
-- `x`, `y`, `z`: 三维坐标
-- `intensity`: 反射强度
-- `ring`: 线束编号
-
-用途：
-
-- 作为 PCAP 解析后的点云点数据模型
-- 方便后续导出、组装、调试
-
----
-
-### 4.3 `src/icv_lidar_tools/time_sync.py`
-
-作用：
-
-- 做时间戳对齐
+用于做时间戳对齐。
 
 核心类：
 
 - `TimeAligner`
 
-核心方法：
+常见用途：
 
-- `align_nearest(left_df, right_df, left_ts_col='timestamp', right_ts_col='timestamp', tolerance_ms=50)`
-
-功能：
-
-- 将两个 DataFrame 按时间戳最近邻方式对齐
-- 内部使用 `pandas.merge_asof`
-- 适合 GNSS、IMU、视频帧时间与点云时间的近似匹配
+- GNSS 与点云对齐
+- 视频帧与点云对齐
+- 多源传感器时间同步
 
 ---
 
-### 4.4 `src/icv_lidar_tools/convert_par_to_csv.py`
+### 2. `src/icv_lidar_tools/convert_par_to_csv.py`
 
-作用：
-
-- 将 `parquet` 文件转换为 `csv`
-- 支持单文件模式和目录批量模式
+用于将 `parquet` 转成 `csv`，支持单文件和目录批量处理。
 
 主要函数：
 
@@ -161,267 +103,14 @@ pip install opencv-python open3d
 
 命令行参数：
 
-- `--input / -i`：单个 parquet 文件
-- `--input-dir`：目录模式
-- `--output / -o`：单文件输出路径
-- `--output-dir`：目录模式输出目录
+- `--input` / `-i`：单文件模式输入
+- `--input-dir`：目录模式输入
+- `--output` / `-o`：单文件模式输出
+- `--output-dir`：目录模式输出
 - `--chunk-size`：分块读取大小
-- `--recursive`：递归搜索子目录
+- `--recursive`：是否递归搜索子目录
 
-用途：
-
-- 将点云数据转换成便于 Excel 或其他工具处理的 CSV 格式
-
----
-
-### 4.5 `src/icv_lidar_tools/visualize_single.py`
-
-作用：
-
-- 使用 `open3d` 可视化点云
-- 默认只显示首个场景/首个时间片的数据
-- 支持按不同模式着色
-
-主要能力：
-
-- 自动检测时间列
-- 读取首个时间片点云
-- 支持颜色模式：
-  - `intensity`
-  - `height`
-  - `distance`
-
-核心函数：
-
-- `_bright_colormap`
-- `_normalize_with_percentile`
-- `_detect_time_column`
-- `_apply_color_mode`
-- `visualize_points(parquet_path, color_mode='intensity')`
-
-用途：
-
-- 快速检查点云数据质量
-- 验证强度/高度/距离颜色映射效果
-
-注意：
-
-- 该脚本依赖 `open3d`
-
----
-
-### 4.6 `src/icv_lidar_tools/lidar/pcap_parser_protocol.py`
-
-作用：
-
-- 解析 LiDAR `pcap` 协议数据
-- 将 UDP 包中的点云结构解码为结构化数据
-- 支持导出 `parquet` / `bin`
-
-核心类：
-
-- `DecodedMsopPacket`
-- `ParseConfig`
-- `MsopDecoder`
-- `ProtocolPcapParser`
-
-重要特征：
-
-- 面向 LeiShen C32 MSOP 协议
-- 提取字段：
-  - `packet_timestamp`
-  - `azimuth_deg`
-  - `ring`
-  - `distance_m`
-  - `intensity`
-  - `x, y, z`
-- 支持批量输出
-- 支持 CUDA 开关（如果环境中安装了 `cupy`）
-
-用途：
-
-- 从原始 `pcap` 中提取点云并标准化存储
-
----
-
-## 5. examples 目录脚本说明
-
-### 5.1 `examples/vl_projection.py`
-
-作用：
-
-- LiDAR 点云投影到视频帧上
-- 读取视频与点云 `parquet` 后，在视频中叠加投影点
-
-特点：
-
-- 支持按时间窗口抽取点云
-- 支持图像边界过滤
-- 支持边缘掩码过滤
-- 支持颜色一致性过滤
-- 支持深度时序过滤
-- 支持按深度或强度着色（你目前正在扩展）
-- 支持默认目录自动寻找视频和 parquet 文件
-
-主要入口：
-
-- `run_projection(config)`
-- `main()`
-
-常见命令示例：
-
-```bash
-python examples/vl_projection.py --video G:/data/video/a.mp4 --parquet G:/data/parquet_out/a.parquet
-```
-
-如果启用自动匹配：
-
-```bash
-python examples/vl_projection.py --match-time 1644
-```
-
-> 注：当前脚本中你已经做过多次实验性修改，建议后续再整理成稳定版参数接口。
-
----
-
-### 5.2 `examples/vl_projection_s.py`
-
-作用：
-
-- 另一个投影脚本的变体
-- 通常用于不同投影策略、不同过滤逻辑或实验参数
-
-建议：
-
-- 作为 `vl_projection.py` 的对照实验版本
-- 如果要正式维护，建议整理成统一参数风格
-
----
-
-### 5.3 `examples/vl_projection acc.py`
-
-作用：
-
-- 投影脚本的加速/实验版本
-- 文件名中的 `acc` 通常表示 accelerated 或 accuracy-related experiment
-
-建议：
-
-- 适合保留为实验备份
-- 若功能稳定，可考虑重命名为更规范的文件名
-
----
-
-### 5.4 `examples/vl_projection_pyqt_tuner.py`
-
-作用：
-
-- 基于 PyQt 的投影调参工具
-- 从文件名看，应该用于交互式调整投影参数、筛选参数或可视化参数
-
-特点：
-
-- GUI 交互式调整
-- 适合现场调试相机外参、时间偏移、过滤阈值等
-
-注意：
-
-- 这类脚本通常依赖 `PyQt` / `PySide` 相关库
-
----
-
-### 5.5 `examples/vl_first_frame_check.py`
-
-作用：
-
-- 检查视频或点云数据的首帧/首个场景是否正确
-
-用途：
-
-- 用于同步校验
-- 判断数据是否从正确时间开始
-
----
-
-### 5.6 `examples/video_rename.py`
-
-作用：
-
-- 批量重命名视频文件
-
-用途：
-
-- 配合时间戳命名规范整理数据集
-- 方便后续自动匹配视频与点云
-
----
-
-### 5.7 `examples/query.py`
-
-作用：
-
-- 看名字像是数据查询或快速验证脚本
-- 可能用于测试点云、视频或协议数据中的某些字段
-
-建议：
-
-- 若需要更明确，可补充脚本头部注释或使用说明
-
----
-
-### 5.8 `examples/pcap_export_protocol_single.py`
-
-作用：
-
-- 单个 `pcap` 文件导出脚本
-- 可能与 `ProtocolPcapParser` 配套使用
-
-用途：
-
-- 将协议包转换为标准点云文件
-- 适合单文件调试
-
----
-
-### 5.9 `examples/visualization_bin_points.py`
-
-作用：
-
-- 可视化 `bin` 格式点云
-
-用途：
-
-- 用于检查导出的 `bin` 数据是否正确
-- 常见于 KITTI 风格或类似格式的数据展示
-
----
-
-### 5.10 `examples/demo_protocol_full_fields_export.py`
-
-作用：
-
-- 演示导出完整协议字段
-- 可能用于把 UDP/协议解析结果导出成包含全部字段的表格
-
-用途：
-
-- 调试协议解析结果
-- 检查字段完整性
-
----
-
-## 6. 典型工作流程
-
-### 6.1 从 PCAP 到点云文件
-
-1. 使用 `pcap_parser_protocol.py` 或示例脚本解析 `pcap`
-2. 导出 `parquet` 或 `bin`
-3. 用 `visualize_single.py` 检查点云
-4. 用 `vl_projection.py` 将点云投影到视频中
-
----
-
-### 6.2 Parquet 转 CSV
+示例：
 
 ```bash
 python -m icv_lidar_tools.convert_par_to_csv --input xxx.parquet --output xxx.csv
@@ -435,28 +124,93 @@ python -m icv_lidar_tools.convert_par_to_csv --input-dir G:/data/parquet_out --o
 
 ---
 
-### 6.3 点云可视化
+### 3. `src/icv_lidar_tools/visualize_single.py`
 
-```bash
-python src/icv_lidar_tools/visualize_single.py
-```
+用于可视化 `parquet` 点云，默认显示首个时间片/首个场景。
 
-或者在代码里调用：
+支持的颜色模式：
 
-```python
-from icv_lidar_tools.visualize_single import visualize_points
-visualize_points("your.parquet", color_mode="intensity")
-```
+- `intensity`
+- `height`
+- `distance`
+
+主要入口：
+
+- `visualize_points(parquet_path, color_mode='intensity')`
+
+适合用于：
+
+- 快速检查点云文件是否正确
+- 验证点云坐标、强度和高度分布
+
+> 该脚本依赖 `open3d`。
 
 ---
 
-### 6.4 LiDAR 与视频投影融合
+### 4. `src/icv_lidar_tools/lidar/pcap_parser_protocol.py`
+
+用于解析 LiDAR `pcap` 协议数据，并导出结构化点云。
+
+主要类：
+
+- `DecodedMsopPacket`
+- `ParseConfig`
+- `MsopDecoder`
+- `ProtocolPcapParser`
+
+主要能力：
+
+- 解析 UDP 协议包
+- 提取 `packet_timestamp`、`azimuth_deg`、`ring`、`distance_m`、`intensity`、`x/y/z` 等字段
+- 支持导出 `parquet` / `bin`
+- 支持批量解析
+
+适用场景：
+
+- 从原始 `pcap` 中提取点云
+- 调试协议字段
+- 为后续投影、可视化和转换做数据准备
+
+
+---
+
+### 5. `src/icv_lidar_tools/models.py`
+
+定义基础数据结构。
+
+常见模型：
+
+- `LidarPoint`
+
+用途：
+
+- 表示解析后的点云点
+- 便于数据导出、测试和中间处理
+
+---
+
+## 示例脚本说明
+
+### `examples/vl_projection.py`
+
+LiDAR 点云投影到视频帧的主脚本之一。
+
+特点：
+
+- 读取视频和点云 `parquet`
+- 在视频帧上叠加投影点
+- 支持时间窗口筛选
+- 支持图像边界过滤、边缘掩码过滤、颜色一致性过滤、深度时序过滤
+- 支持按深度或强度着色
+- 支持自动匹配目录中的视频和点云文件
+
+示例：
 
 ```bash
-python examples/vl_projection.py --video your.mp4 --parquet your.parquet
+python examples/vl_projection.py --video G:/data/video/a.mp4 --parquet G:/data/parquet_out/a.parquet
 ```
 
-如果使用自动匹配目录：
+如果使用自动匹配：
 
 ```bash
 python examples/vl_projection.py --match-time 1644
@@ -464,11 +218,117 @@ python examples/vl_projection.py --match-time 1644
 
 ---
 
-## 7. 数据字段说明
+### `examples/vl_projection_pyqt_tuner.py`
 
-### 7.1 点云常见字段
+基于 PyQt 的投影调参工具。
 
-在项目中，点云/协议解析常见字段包括：
+适合：
+
+- 交互式调节外参
+- 调节时间偏移
+- 测试不同过滤参数
+- 现场快速观察投影效果
+
+---
+
+
+### `examples/video_rename.py`
+
+用于批量重命名视频文件，方便按照时间戳或采集编号统一管理数据。
+
+---
+
+### `examples/query.py`
+
+用于快速查询或调试某些点云、视频或协议字段。
+
+---
+
+### `examples/pcap_export_protocol_single.py`
+
+单个 `pcap` 导出示例，适合单文件调试。
+
+---
+
+### `examples/pcap_export_protocol_all.py`
+
+批量导出多个 `pcap` 文件的示例。
+
+---
+
+### `examples/visualization_bin_points.py`
+
+用于可视化 `bin` 格式点云。
+
+适合：
+
+- 检查导出的二进制点云是否正确
+- 查看是否符合预期格式
+
+---
+
+### `examples/demo_protocol_full_fields_export.py`
+
+演示导出完整协议字段，便于查看解析结果是否完整。
+
+---
+
+## 常见工作流程
+
+### 1. 从 `pcap` 到点云文件
+
+1. 使用 `pcap_parser_protocol.py` 或示例脚本解析 `pcap`
+2. 导出为 `parquet` 或 `bin`
+3. 用 `visualize_single.py` 检查点云
+4. 用 `vl_projection.py` 将点云投影到视频中
+
+---
+
+### 2. `parquet` 转 `csv`
+
+单文件：
+
+```bash
+python -m icv_lidar_tools.convert_par_to_csv --input xxx.parquet --output xxx.csv
+```
+
+目录批量：
+
+```bash
+python -m icv_lidar_tools.convert_par_to_csv --input-dir G:/data/parquet_out --output-dir G:/data/csv_out --recursive
+```
+
+---
+
+### 3. 点云可视化
+
+```bash
+python src/icv_lidar_tools/visualize_single.py
+```
+
+或者在代码中调用：
+
+```python
+from icv_lidar_tools.visualize_single import visualize_points
+
+visualize_points("your.parquet", color_mode="intensity")
+```
+
+---
+
+### 4. LiDAR 与视频投影融合
+
+```bash
+python examples/vl_projection.py --video your.mp4 --parquet your.parquet
+```
+
+---
+
+## 数据字段说明
+
+### 点云常见字段
+
+项目中常见点云字段包括：
 
 - `timestamp_ns`
 - `x`
@@ -477,9 +337,9 @@ python examples/vl_projection.py --match-time 1644
 - `intensity`
 - `ring`
 
-### 7.2 协议导出完整字段
+### 协议导出字段
 
-在 `pcap_parser_protocol.py` 中，导出结果还可能包含：
+在 `pcap_parser_protocol.py` 的导出结果中，还可能包含：
 
 - `packet_timestamp`
 - `src_port`
@@ -493,39 +353,29 @@ python examples/vl_projection.py --match-time 1644
 - `distance_m`
 - `vertical_angle_deg`
 
----
 
-## 8. 使用注意事项
-
-1. `vl_projection.py` 目前是实验性较强的脚本，里面包含多个过滤环节和历史修补逻辑。
-2. `open3d`、`opencv-python` 等依赖需要手动安装。
-3. 如果数据时间戳格式不统一，`TimeAligner` 和投影脚本的匹配结果可能受影响。
-4. `pcap_parser_protocol.py` 目前偏向特定协议格式，使用前要确认你的雷达设备协议一致。
-5. `examples/` 下的脚本大多是调试/实验用途，正式使用建议整理参数接口。
 
 ---
 
-## 9. 建议的运行环境
+## 推荐运行环境
 
 - Python 3.10+
 - Windows 10 / Windows 11
 - `numpy`
 - `pandas`
 - `pyarrow`
-- `opencv-python`
-- `open3d`
 - `scapy`
+- `open3d`
+- `opencv-python`
 
 ---
 
-## 10. 总结
+## 总结
 
-这个项目的核心能力可以概括为：
+这个项目目前可以概括为四类能力：
 
-- **解析**：从 `pcap` 解出 LiDAR 原始数据
-- **转换**：导出 `parquet`、`bin`、`csv`
-- **对齐**：按时间戳对齐多源数据
-- **可视化**：查看点云单帧或首个场景
-- **融合**：把 LiDAR 点投影到视频帧上
-
+- **解析**：从 `pcap` 解码 LiDAR 原始数据
+- **转换**：导出为 `parquet`、`bin`、`csv`
+- **对齐**：进行时间戳同步与匹配
+- **可视化/融合**：查看点云并投影到视频帧上
 
